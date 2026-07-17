@@ -1,0 +1,12 @@
+# Live network data — never commit. These contain MACs, IPs, device names,
+# floor-plan geometry and console identifiers from a real deployment.
+project.json
+system.json
+*.csv
+*.zip
+maps/
+images/
+
+# Python
+__pycache__/
+*.pyc

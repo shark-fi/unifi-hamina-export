@@ -394,6 +394,16 @@ def download_maps(http_, base, prefix, site, maps, out_dir):
 
 INNERSPACE_API = "/proxy/innerspace/api"
 
+# InnerSpace SKU -> a model name Hamina's AP library accepts. Hamina silently
+# DROPS access points whose model it cannot resolve, so a bad name here loses
+# APs with no error. Verified against a real import: uap-ac-lite, uap-ac-iw,
+# u6-enterprise and u7-pro-max resolve as-is; "uap-ac-m" did not (all five
+# UAP-AC-M APs vanished), hence the alias to the full product name.
+INNERSPACE_SKU_ALIASES = {
+    "uap-ac-m": "uap-ac-mesh",
+    "uap-ac-m-pro": "uap-ac-mesh-pro",
+}
+
 # InnerSpace wall variant -> (OpenIntent wall_type label, attenuation dB)
 # Attenuation values are InnerSpace's own defaults for these materials; Hamina
 # maps unknown wall types onto its own library, so the label matters most.
@@ -419,13 +429,19 @@ def innerspace_project(http_, base):
 
 
 def scene_to_pixels(pt, map_shape, img_w, img_h):
-    """InnerSpace scene units -> image pixels, origin top-left."""
+    """InnerSpace scene units -> OpenIntent pixel coordinates.
+
+    Both systems have y pointing up — InnerSpace measures from the image
+    centre, OpenIntent from the bottom-left corner — so this only re-centres.
+    Do NOT flip y here: doing so mirrors every AP and wall about the middle of
+    the floor plan (verified against a real import).
+    """
     off = (map_shape.get("position") or [{}])[0]
     sc = map_shape.get("scale") or {}
     sx = float(sc.get("x") or 1) or 1
     sy = float(sc.get("y") or 1) or 1
     x = (float(pt["x"]) - float(off.get("x") or 0)) / sx + img_w / 2.0
-    y = img_h / 2.0 - (float(pt["y"]) - float(off.get("y") or 0)) / sy
+    y = (float(pt["y"]) - float(off.get("y") or 0)) / sy + img_h / 2.0
     return x, y
 
 
@@ -583,9 +599,10 @@ def run_innerspace(args):
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
                         "model": dev.get("model") or sku}, fp["name"], coords)
-            ap["model"] = sku.lower()          # InnerSpace SKU is the real name
+            model = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
+            ap["model"] = model
             ap["model_original"] = sku
-            ap["antennas"] = [{"vendor": "ubiquiti", "model": sku.lower(),
+            ap["antennas"] = [{"vendor": "ubiquiti", "model": model,
                                "bands": ap["antennas"][0]["bands"]}]
             if mac:
                 m = mac.replace(":", "").lower()

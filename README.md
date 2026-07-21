@@ -117,6 +117,28 @@ coordinates, and per-band channel / TX power.
   `--verify-tls` enables it.
 - Every call this tool makes is a GET.
 
+## Disclaimer
+
+This is an independent, unofficial project. It is not affiliated with,
+endorsed by, or supported by Ubiquiti Inc. or Hamina Wireless Oy. UniFi,
+InnerSpace and Hamina are trademarks of their respective owners.
+
+The InnerSpace endpoints and data model documented here are **undocumented
+internal APIs**, determined by observing the InnerSpace web application in
+order to interoperate with it. They carry no stability guarantee and may
+change or disappear in any UniFi release — if an update breaks this tool,
+that is expected, not a defect on Ubiquiti's part.
+
+This tool only ever issues HTTP GET requests. It reads floor plans, device
+placements and radio state; it never creates, modifies or deletes anything on
+a console. The write endpoints that exist in the InnerSpace API are
+deliberately not called.
+
+Use it on equipment you own or are authorised to administer. It requires
+credentials for that console and offers no way to reach one you cannot
+already log in to. As stated in the [license](LICENSE), the software is
+provided "as is", without warranty of any kind.
+
 ## License
 
 [MIT](LICENSE) © 2026 Mark Houtz

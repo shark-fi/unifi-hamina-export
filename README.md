@@ -116,3 +116,7 @@ coordinates, and per-band channel / TX power.
 - TLS verification is off by default for local consoles (self-signed certs).
   `--verify-tls` enables it.
 - Every call this tool makes is a GET.
+
+## License
+
+[MIT](LICENSE) © 2026 Mark Houtz

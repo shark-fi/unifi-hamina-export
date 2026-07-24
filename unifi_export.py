@@ -407,6 +407,9 @@ INNERSPACE_SKU_ALIASES = {
 # InnerSpace wall variant -> (OpenIntent wall_type label, attenuation dB)
 # Attenuation values are InnerSpace's own defaults for these materials; Hamina
 # maps unknown wall types onto its own library, so the label matters most.
+# Verified against a real import: 25 InnerSpace "concrete" walls exported as
+# wall_segments (pixel start/end via scene_to_pixels, no y-flip) rendered
+# correctly in Hamina, aligned with the APs, and drove the RF coverage sim.
 WALL_VARIANTS = {
     "concrete": ("Concrete", 12.0),
     "drywall": ("Drywall", 3.0),

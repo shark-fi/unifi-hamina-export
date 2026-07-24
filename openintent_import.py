@@ -93,10 +93,14 @@ def parse_openintent(zip_path: str) -> dict:
         px = next((d for d in dims if d.get("unit") == "pixels"), dims[0])
         img_w = float(px.get("width") or 0)
         img_h = float(px.get("length") or 0)
+        mm = next((d for d in dims if d.get("unit") == "meters"), None)
+        width_m = float(mm["width"]) if mm and mm.get("width") else None
+        ceiling_m = float(mm["height"]) if mm and mm.get("height") else 2.5
         image_name, image_bytes = _read_image(zf, fp)
         by_name[name] = {
             "name": name, "image_name": image_name, "image_bytes": image_bytes,
             "img_w": img_w, "img_h": img_h,
+            "width_m": width_m, "ceiling_m": ceiling_m,
             "walls": [_wall(w) for w in (fp.get("wall_segments") or [])],
             "aps": [],
         }
@@ -172,6 +176,23 @@ def find_product_id(ap: dict, products: list) -> str | None:
             if v and v in wanted:
                 return p.get("id")
     return None
+
+
+def scale_shape(plan_id, project_id, img_w, width_m, ceiling_m):
+    """A `scale` shape that sets the plan's real-world scale so coverage renders
+    accurately (no "Set Scale" prompt). A full-width scale line spanning `img_w`
+    px carries `width_m` metres, giving metres/px = width_m/img_w — the same
+    scale the OpenIntent file was built with. Fresh plans have map scale 1 and
+    origin-centre, so scene x runs -img_w/2 .. +img_w/2."""
+    half = round(img_w / 2.0, 4)
+    return {
+        "id": str(uuid.uuid4()), "planId": plan_id, "projectId": project_id,
+        "type": "scale", "status": 0,
+        "position": [{"x": -half, "y": 0, "z": 0}, {"x": half, "y": 0, "z": 0}],
+        "scale": round(width_m, 4), "height": ceiling_m,
+        "computedScale": None, "defaultScale": False, "defaultHeight": False,
+        "createdAt": _ISO, "updatedAt": _ISO,
+    }
 
 
 def wall_shape(plan_id, project_id, variant, a, b):
@@ -316,6 +337,13 @@ def run(args):
         file_url = w.upload_image(fp["image_name"], fp["image_bytes"])
         plan_id, proj_id = w.create_plan(title, file_url)
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
+
+        # set the plan scale first so coverage renders accurately (no "Set Scale")
+        if fp.get("width_m"):
+            w.shape_create([scale_shape(plan_id, proj_id, fp["img_w"],
+                                        fp["width_m"], fp["ceiling_m"])])
+        else:
+            print("  (no metres dimension in the export -> scale left unset)")
 
         walls = [wall_shape(plan_id, proj_id, wall_variant(wl["wall_type"]),
                             to_scene(*wl["start"], fp["img_w"], fp["img_h"]),

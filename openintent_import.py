@@ -45,11 +45,44 @@ from unifi_export import (
 )
 
 INNERSPACE_API = "/proxy/innerspace/api"
-# OpenIntent wall_type label -> InnerSpace variant (reverse of WALL_VARIANTS).
+# OpenIntent wall_type label -> InnerSpace variant (reverse of the exporter's own
+# labels; exact match tried first).
 WALL_LABEL_TO_VARIANT = {label: variant for variant, (label, _att) in WALL_VARIANTS.items()}
 # model (as the exporter emits it) -> InnerSpace SKU (reverse of the export aliases).
 MODEL_TO_SKU = {model: sku for sku, model in INNERSPACE_SKU_ALIASES.items()}
-# OpenIntent band label -> nothing needed on import; radios are InnerSpace-derived.
+
+# The full InnerSpace built-in wall variant set (docs/INNERSPACE_WRITE_API.md) —
+# richer than the exporter's 8. These are the canonical write targets.
+INNERSPACE_WALL_VARIANTS = {
+    "concrete", "drywall", "drywall_heavy", "glass", "glass_thin", "brick",
+    "metal", "wood", "door_wood", "door_metal", "door_glass",
+    "window_1_pane", "window_2_pane", "window_3_pane",
+}
+# Common OpenIntent/Hamina wall-material phrasings -> InnerSpace variant. Keys are
+# normalized (lowercase, non-alphanumeric collapsed to single spaces).
+_WALL_ALIASES = {
+    "concrete": "concrete", "cinder block": "concrete", "cinderblock": "concrete",
+    "cmu": "concrete", "solid wall": "concrete",
+    "drywall": "drywall", "gypsum": "drywall", "gypsum board": "drywall",
+    "plasterboard": "drywall", "sheetrock": "drywall", "plaster": "drywall",
+    "interior wall": "drywall", "partition": "drywall",
+    "drywall heavy": "drywall_heavy", "heavy drywall": "drywall_heavy",
+    "thick drywall": "drywall_heavy", "double drywall": "drywall_heavy",
+    "glass": "glass", "glass thin": "glass_thin", "thin glass": "glass_thin",
+    "brick": "brick",
+    "metal": "metal", "steel": "metal", "sheet metal": "metal",
+    "wood": "wood", "wooden": "wood", "plywood": "wood", "timber": "wood",
+    "wood door": "door_wood", "wooden door": "door_wood", "door wood": "door_wood",
+    "metal door": "door_metal", "door metal": "door_metal", "steel door": "door_metal",
+    "glass door": "door_glass", "door glass": "door_glass",
+    "window": "window_1_pane", "single pane window": "window_1_pane",
+    "single pane": "window_1_pane", "window 1 pane": "window_1_pane",
+    "1 pane window": "window_1_pane",
+    "double pane window": "window_2_pane", "double pane": "window_2_pane",
+    "window 2 pane": "window_2_pane", "2 pane window": "window_2_pane",
+    "triple pane window": "window_3_pane", "triple pane": "window_3_pane",
+    "window 3 pane": "window_3_pane", "3 pane window": "window_3_pane",
+}
 
 _ISO = "2026-01-01T00:00:00.000Z"   # placeholder timestamp; server stamps its own
 
@@ -154,12 +187,43 @@ def to_scene(px: float, py: float, img_w: float, img_h: float) -> tuple[float, f
     return round(px - img_w / 2.0, 4), round(py - img_h / 2.0, 4)
 
 
-def wall_variant(wall_type: str) -> str:
-    """OpenIntent wall label -> InnerSpace variant."""
-    if wall_type in WALL_LABEL_TO_VARIANT:
+def _norm(s: str) -> str:
+    """lowercase, collapse any run of non-alphanumerics to a single space."""
+    return " ".join("".join(c if c.isalnum() else " " for c in s.lower()).split())
+
+
+def wall_variant(wall_type: str, misses: set | None = None) -> str:
+    """OpenIntent wall label -> InnerSpace variant, robust across phrasings.
+
+    Order: exact exporter label -> alias table -> already-a-variant ->
+    keyword heuristic -> default 'drywall' (recorded in `misses` if given)."""
+    if not wall_type:
+        return "drywall"
+    if wall_type in WALL_LABEL_TO_VARIANT:            # exporter's own labels
         return WALL_LABEL_TO_VARIANT[wall_type]
-    guess = wall_type.strip().lower().replace(" ", "_")
-    return guess or "drywall"
+    n = _norm(wall_type)
+    if n in _WALL_ALIASES:
+        return _WALL_ALIASES[n]
+    underscored = n.replace(" ", "_")
+    if underscored in INNERSPACE_WALL_VARIANTS:       # label already a variant
+        return underscored
+    if "window" in n:                                 # keyword heuristics
+        return ("window_3_pane" if ("3" in n or "triple" in n)
+                else "window_2_pane" if ("2" in n or "double" in n)
+                else "window_1_pane")
+    if "door" in n:
+        return ("door_glass" if "glass" in n
+                else "door_metal" if ("metal" in n or "steel" in n)
+                else "door_wood")
+    for kw, var in (("concrete", "concrete"), ("brick", "brick"),
+                    ("glass", "glass"), ("metal", "metal"), ("steel", "metal"),
+                    ("wood", "wood"), ("timber", "wood"),
+                    ("drywall", "drywall"), ("gypsum", "drywall")):
+        if kw in n:
+            return var
+    if misses is not None:
+        misses.add(wall_type)
+    return "drywall"
 
 
 def find_product_id(ap: dict, products: list) -> str | None:
@@ -345,11 +409,22 @@ def run(args):
         else:
             print("  (no metres dimension in the export -> scale left unset)")
 
-        walls = [wall_shape(plan_id, proj_id, wall_variant(wl["wall_type"]),
-                            to_scene(*wl["start"], fp["img_w"], fp["img_h"]),
-                            to_scene(*wl["end"], fp["img_w"], fp["img_h"]))
-                 for wl in fp["walls"]]
+        wall_misses: set = set()
+        mat_counts: dict = {}
+        walls = []
+        for wl in fp["walls"]:
+            variant = wall_variant(wl["wall_type"], wall_misses)
+            mat_counts[variant] = mat_counts.get(variant, 0) + 1
+            walls.append(wall_shape(
+                plan_id, proj_id, variant,
+                to_scene(*wl["start"], fp["img_w"], fp["img_h"]),
+                to_scene(*wl["end"], fp["img_w"], fp["img_h"])))
         if walls:
+            print("  wall materials: " + ", ".join(
+                "%s×%d" % (v, n) for v, n in sorted(mat_counts.items())))
+            if wall_misses:
+                print("  (unrecognized wall label(s) defaulted to drywall: %s)"
+                      % ", ".join(sorted(wall_misses)))
             w.shape_create(walls)
 
         devices = []

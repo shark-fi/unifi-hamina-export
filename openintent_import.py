@@ -27,10 +27,13 @@ Examples:
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import io
 import json
 import sys
+import urllib.error
+import urllib.request
 import uuid
 import zipfile
 
@@ -49,6 +52,29 @@ MODEL_TO_SKU = {model: sku for sku, model in INNERSPACE_SKU_ALIASES.items()}
 # OpenIntent band label -> nothing needed on import; radios are InnerSpace-derived.
 
 _ISO = "2026-01-01T00:00:00.000Z"   # placeholder timestamp; server stamps its own
+
+
+# --- UniFi OS write auth: X-CSRF-Token -----------------------------------
+def apply_csrf(http_) -> str | None:
+    """UniFi OS requires X-CSRF-Token on every mutating request. The token is
+    the `csrfToken` claim inside the `TOKEN` session-cookie JWT. Extract it and
+    put it on the shared headers so all writes carry it. (GET-only tools like
+    the exporter never needed this.)"""
+    token = None
+    for c in http_.jar:
+        if c.name == "TOKEN" and c.value and c.value.count(".") >= 2:
+            payload = c.value.split(".")[1]
+            payload += "=" * (-len(payload) % 4)  # pad base64url
+            try:
+                claims = json.loads(base64.urlsafe_b64decode(payload))
+                token = claims.get("csrfToken") or token
+            except Exception:
+                pass
+    if not token:  # fall back to whatever login stashed from the response header
+        token = http_.extra_headers.get("X-CSRF-Token")
+    if token:
+        http_.extra_headers["X-CSRF-Token"] = token
+    return token
 
 
 # --- Phase 2: parse the OpenIntent export --------------------------------
@@ -208,11 +234,14 @@ class Writer:
         body = _multipart(boundary, "2D", name or "map.png", blob or b"")
         req_headers = {"Content-Type": "multipart/form-data; boundary=%s" % boundary}
         url = self._url("/project/plan/upload")
-        import urllib.request
         h = {**self.http.extra_headers, **req_headers}
         req = urllib.request.Request(url, data=body, headers=h, method="POST")
-        with self.http.opener.open(req, timeout=60) as r:
-            out = json.loads(r.read() or b"null")
+        try:
+            with self.http.opener.open(req, timeout=60) as r:
+                out = json.loads(r.read() or b"null")
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:400]
+            raise RuntimeError("image upload -> HTTP %s %s" % (e.code, detail))
         return (out.get("data", {}).get("files") or [None])[0]
 
     def create_plan(self, title, file_url):
@@ -269,6 +298,8 @@ def run(args):
         http_ = Http(verify=args.verify_tls)
         pw = args.password or getpass.getpass("password for %s: " % args.username)
         legacy_login(http_, base, args.username, pw)
+        csrf = apply_csrf(http_)
+        print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
     project_id, products = load_catalog(args, http_, base)
     print("catalog: %d product(s); projectId=%s" % (len(products), project_id))
 

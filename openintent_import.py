@@ -84,6 +84,30 @@ _WALL_ALIASES = {
     "window 3 pane": "window_3_pane", "3 pane window": "window_3_pane",
 }
 
+# InnerSpace built-in attenuation-object variants (docs/INNERSPACE_WRITE_API.md).
+INNERSPACE_ATTEN_VARIANTS = {
+    "car", "cubicles", "elevator", "foliage_heavy", "foliage_light",
+    "human_crowd", "machinery", "server_rack", "shelf_small", "shelf_medium",
+    "shelf_warehouse", "truck",
+}
+# Common obstacle/attenuation-area phrasings -> InnerSpace variant (normalized keys).
+_ATTEN_ALIASES = {
+    "car": "car", "vehicle": "car", "truck": "truck", "lorry": "truck",
+    "cubicles": "cubicles", "cubicle": "cubicles", "office cubicles": "cubicles",
+    "elevator": "elevator", "lift": "elevator",
+    "foliage": "foliage_heavy", "foliage heavy": "foliage_heavy",
+    "heavy foliage": "foliage_heavy", "trees": "foliage_heavy", "tree": "foliage_heavy",
+    "foliage light": "foliage_light", "light foliage": "foliage_light",
+    "bushes": "foliage_light", "shrubs": "foliage_light",
+    "human crowd": "human_crowd", "crowd": "human_crowd", "people": "human_crowd",
+    "machinery": "machinery", "machine": "machinery", "equipment": "machinery",
+    "server rack": "server_rack", "rack": "server_rack", "servers": "server_rack",
+    "shelf": "shelf_medium", "shelving": "shelf_medium",
+    "shelf small": "shelf_small", "small shelf": "shelf_small",
+    "shelf medium": "shelf_medium", "medium shelf": "shelf_medium",
+    "shelf warehouse": "shelf_warehouse", "warehouse shelf": "shelf_warehouse",
+}
+
 _ISO = "2026-01-01T00:00:00.000Z"   # placeholder timestamp; server stamps its own
 
 
@@ -135,6 +159,7 @@ def parse_openintent(zip_path: str) -> dict:
             "img_w": img_w, "img_h": img_h,
             "width_m": width_m, "ceiling_m": ceiling_m,
             "walls": [_wall(w) for w in (fp.get("wall_segments") or [])],
+            "atten": _attenuation_objects(fp),
             "aps": [],
         }
     # attach APs to their floorplan
@@ -178,6 +203,51 @@ def _ap_pixel(ap):
         if xyz.get("unit") == "pixels":
             return float(xyz["x"]), float(xyz["y"])
     return None
+
+
+# OpenIntent has no standardized obstacle key across Hamina versions, so probe
+# the likely ones and accept several polygon encodings. Adjust when a real
+# export with attenuation objects is available.
+_ATTEN_KEYS = ("attenuation_objects", "attenuationObjects", "attenuation_areas",
+               "attenuationAreas", "obstacles", "attenuation_zones")
+
+
+def _attenuation_objects(fp) -> list:
+    raw = None
+    for k in _ATTEN_KEYS:
+        if fp.get(k):
+            raw = fp[k]
+            break
+    out = []
+    for obj in (raw or []):
+        pts = _polygon_pixels(obj)
+        if len(pts) < 3:
+            continue
+        material = (obj.get("type") or obj.get("material") or obj.get("variant")
+                    or obj.get("name") or "")
+        out.append({"material": material, "polygon": pts})
+    return out
+
+
+def _polygon_pixels(obj) -> list:
+    """Pull a pixel polygon out of an obstacle, tolerating several encodings:
+    polygon/points/vertices/coordinates of {x,y} or {coordinate_xyz:{x,y,unit}}."""
+    for key in ("polygon", "points", "vertices", "coordinates", "shape"):
+        seq = obj.get(key)
+        if not isinstance(seq, list) or not seq:
+            continue
+        pts = []
+        for p in seq:
+            if not isinstance(p, dict):
+                continue
+            xyz = p.get("coordinate_xyz") or p
+            if xyz.get("unit") not in (None, "pixels"):
+                continue  # prefer pixel coords; skip metre-only entries
+            if "x" in xyz and "y" in xyz:
+                pts.append((float(xyz["x"]), float(xyz["y"])))
+        if len(pts) >= 3:
+            return pts
+    return []
 
 
 # --- Phase 3: map to InnerSpace ------------------------------------------
@@ -240,6 +310,46 @@ def find_product_id(ap: dict, products: list) -> str | None:
             if v and v in wanted:
                 return p.get("id")
     return None
+
+
+def atten_variant(material: str, misses: set | None = None) -> str:
+    """OpenIntent obstacle material -> InnerSpace attenuation-object variant."""
+    if not material:
+        if misses is not None:
+            misses.add("(unnamed)")
+        return "cubicles"
+    n = _norm(material)
+    if n in _ATTEN_ALIASES:
+        return _ATTEN_ALIASES[n]
+    underscored = n.replace(" ", "_")
+    if underscored in INNERSPACE_ATTEN_VARIANTS:
+        return underscored
+    for kw, var in (("server", "server_rack"), ("rack", "server_rack"),
+                    ("cubicle", "cubicles"), ("elevator", "elevator"),
+                    ("lift", "elevator"), ("foliage", "foliage_heavy"),
+                    ("tree", "foliage_heavy"), ("bush", "foliage_light"),
+                    ("crowd", "human_crowd"), ("people", "human_crowd"),
+                    ("machine", "machinery"), ("equipment", "machinery"),
+                    ("shelf", "shelf_medium"), ("shelv", "shelf_medium"),
+                    ("truck", "truck"), ("car", "car"), ("vehicle", "car")):
+        if kw in n:
+            return var
+    if misses is not None:
+        misses.add(material)
+    return "cubicles"
+
+
+def atten_shape(plan_id, project_id, variant, points_scene):
+    """An `attenuationObject` shape (closed polygon), matched to the captured
+    write shape."""
+    poly = [{"x": x, "y": y, "z": 0} for (x, y) in points_scene]
+    if poly and poly[0] != poly[-1]:
+        poly.append(dict(poly[0]))            # close the ring, as InnerSpace does
+    return {
+        "id": str(uuid.uuid4()), "planId": plan_id, "projectId": project_id,
+        "type": "attenuationObject", "variant": variant, "status": 0,
+        "position": poly, "createdAt": _ISO, "updatedAt": _ISO,
+    }
 
 
 def scale_shape(plan_id, project_id, img_w, width_m, ceiling_m):
@@ -426,6 +536,24 @@ def run(args):
                 print("  (unrecognized wall label(s) defaulted to drywall: %s)"
                       % ", ".join(sorted(wall_misses)))
             w.shape_create(walls)
+
+        # attenuation objects (obstacles: racks, cubicles, foliage, ...)
+        atten_misses: set = set()
+        acounts: dict = {}
+        attens = []
+        for ao in fp.get("atten") or []:
+            variant = atten_variant(ao["material"], atten_misses)
+            acounts[variant] = acounts.get(variant, 0) + 1
+            attens.append(atten_shape(
+                plan_id, proj_id, variant,
+                [to_scene(px, py, fp["img_w"], fp["img_h"]) for px, py in ao["polygon"]]))
+        if attens:
+            print("  attenuation objects: " + ", ".join(
+                "%s×%d" % (v, n) for v, n in sorted(acounts.items())))
+            if atten_misses:
+                print("  (unrecognized obstacle label(s) defaulted to cubicles: %s)"
+                      % ", ".join(sorted(atten_misses)))
+            w.shape_create(attens)
 
         devices = []
         for ap in fp["aps"]:

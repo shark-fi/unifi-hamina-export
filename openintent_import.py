@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import base64
 import getpass
+import hashlib
 import io
 import json
 import os
@@ -220,11 +221,15 @@ def parse_openintent(zip_path: str) -> dict:
         px = _ap_pixel(ap)
         if px is None:
             continue
+        mac = (ap.get("mac_address") or "").replace(":", "").upper()
+        synth = not mac
+        if synth:                      # Hamina exports omit MACs; InnerSpace won't
+            mac = _synth_mac(ap.get("name") or "AP")   # place a device without one
         target["aps"].append({
             "name": ap.get("name") or "AP",
             "model": (ap.get("model") or "").lower(),
             "model_original": ap.get("model_original") or ap.get("model") or "",
-            "mac": (ap.get("mac_address") or "").replace(":", "").upper(),
+            "mac": mac, "mac_synth": synth,
             "x": px[0], "y": px[1],
         })
     return {"floorplans": list(by_name.values())}
@@ -244,6 +249,13 @@ def _wall(w):
         "start": (float(w["start_point"]["x"]), float(w["start_point"]["y"])),
         "end": (float(w["end_point"]["x"]), float(w["end_point"]["y"])),
     }
+
+
+def _synth_mac(name: str) -> str:
+    """A stable, locally-administered placeholder MAC (12 hex, uppercase) derived
+    from the AP name, for exports (like Hamina's) that omit MACs. `02` prefix =
+    locally-administered/unicast; deterministic so re-imports stay stable."""
+    return "02" + hashlib.md5(name.encode("utf-8")).hexdigest().upper()[:10]
 
 
 def _ap_pixel(ap):
@@ -512,20 +524,26 @@ def _multipart(boundary, field, filename, blob):
     return head + blob + tail
 
 
-# --- catalog (product list + projectId) ----------------------------------
+# --- catalog (product list + projectId + adopted device name->MAC) --------
 def load_catalog(args, http_, base):
     if args.project_json:
         body = json.load(open(args.project_json))
         data = body.get("data", body)
-        products = data.get("products") or []
-        pid = ((data.get("project") or {}).get("id")
-               or (data.get("plans") or [{}])[0].get("projectId"))
-        return pid or "<project-id>", products
-    data = http_.get_json("%s%s/project?mode=2D" % (base, INNERSPACE_API)).get("data", {})
+    else:
+        data = http_.get_json("%s%s/project?mode=2D" % (base, INNERSPACE_API)).get("data", {})
     products = data.get("products") or []
     pid = ((data.get("project") or {}).get("id")
-           or (data.get("plans") or [{}])[0].get("projectId"))
-    return pid, products
+           or (data.get("plans") or [{}])[0].get("projectId") or "<project-id>")
+    # existing device shapes carry the real adopted MAC + title; build name->MAC
+    # so imported APs (which Hamina exports WITHOUT MACs) resolve to real hardware.
+    name_to_mac = {}
+    for s in data.get("shapes") or []:
+        if s.get("type") == "device":
+            mac = ((s.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+            title = s.get("title") or ""
+            if mac and title:
+                name_to_mac[_norm(title)] = mac
+    return pid, products, name_to_mac
 
 
 # --- orchestration -------------------------------------------------------
@@ -544,8 +562,22 @@ def run(args):
         legacy_login(http_, base, args.username, pw)
         csrf = apply_csrf(http_)
         print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
-    project_id, products = load_catalog(args, http_, base)
-    print("catalog: %d product(s); projectId=%s" % (len(products), project_id))
+    project_id, products, name_to_mac = load_catalog(args, http_, base)
+    print("catalog: %d product(s), %d adopted device MAC(s); projectId=%s"
+          % (len(products), len(name_to_mac), project_id))
+
+    # resolve MAC-less imported APs to real adopted hardware by name (Hamina omits
+    # MACs; InnerSpace places a device by matching its MAC to an adopted AP).
+    n_matched = 0
+    for fp in fps:
+        for ap in fp["aps"]:
+            if ap.get("mac_synth"):
+                real = name_to_mac.get(_norm(ap["name"]))
+                if real:
+                    ap["mac"], ap["mac_synth"], ap["mac_matched"] = real, False, True
+                    n_matched += 1
+    if n_matched:
+        print("matched %d AP(s) to adopted MACs by name" % n_matched)
 
     socket_id = str(uuid.uuid4())
     w = Writer(http_, base, socket_id, dry_run=not args.commit)
@@ -614,6 +646,10 @@ def run(args):
                 plan_id, proj_id, ap, pid,
                 to_scene(ap["x"], ap["y"], fp["img_w"], fp["img_h"])))
         if devices:
+            n_synth = sum(1 for ap in fp["aps"] if ap.get("mac_synth"))
+            print("  devices: %d AP(s)%s" % (
+                len(devices),
+                " (%d with synthesized placeholder MAC)" % n_synth if n_synth else ""))
             w.shape_create(devices)
 
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))

@@ -31,6 +31,7 @@ import base64
 import getpass
 import io
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
@@ -135,14 +136,62 @@ def apply_csrf(http_) -> str | None:
 
 
 # --- Phase 2: parse the OpenIntent export --------------------------------
+def _load_openintent(path: str):
+    """Load the OpenIntent doc + an image reader from a .zip or a bare .json.
+
+    Hamina names the JSON `openIntent_<Project>.json` (not `openintent.json`) and
+    adds `export-warnings.json`, so find the OpenIntent doc by CONTENT (has
+    `floorplans`/`openintent_version`), not by filename. Returns (data, reader)
+    where reader(rel_path) -> image bytes or None."""
+    if path.lower().endswith(".zip"):
+        zf = zipfile.ZipFile(path)
+        names = zf.namelist()
+        data = None
+        for n in names:
+            if not n.lower().endswith(".json"):
+                continue
+            try:
+                j = json.loads(zf.read(n))
+            except Exception:
+                continue
+            if isinstance(j, dict) and ("floorplans" in j or "openintent_version" in j):
+                data = j
+                break
+        if data is None:
+            raise RuntimeError("no OpenIntent JSON (with 'floorplans') in %s" % path)
+
+        def reader(rel):
+            base = rel.split("/")[-1]
+            for n in names:
+                if n == rel or n.lstrip("./") == rel.lstrip("./") or n.split("/")[-1] == base:
+                    if n.lower().endswith((".png", ".jpg", ".jpeg")):
+                        return zf.read(n)
+            return None
+        return data, reader
+
+    with open(path, encoding="utf-8") as f:
+        data = json.load(f)
+    root = os.path.dirname(os.path.abspath(path))
+
+    def reader(rel):
+        rel = rel.lstrip("./")
+        base = rel.split("/")[-1]
+        for cand in (os.path.join(root, rel), os.path.join(root, "images", base),
+                     os.path.join(root, base)):
+            if os.path.exists(cand):
+                with open(cand, "rb") as fh:
+                    return fh.read()
+        return None
+    return data, reader
+
+
 def parse_openintent(zip_path: str) -> dict:
     """Return {floorplans:[{name,image_name,image_bytes,img_w,img_h,walls,aps}]}.
 
     walls: [{wall_type,start:(x,y),end:(x,y)}]   (pixel coords)
     aps:   [{name,model,model_original,mac,x,y}] (pixel coords)
     """
-    zf = zipfile.ZipFile(zip_path)
-    data = json.loads(zf.read("openintent.json"))
+    data, reader = _load_openintent(zip_path)
     by_name: dict[str, dict] = {}
     for fp in data.get("floorplans", []):
         name = fp.get("name") or "Plan"
@@ -153,7 +202,7 @@ def parse_openintent(zip_path: str) -> dict:
         mm = next((d for d in dims if d.get("unit") == "meters"), None)
         width_m = float(mm["width"]) if mm and mm.get("width") else None
         ceiling_m = float(mm["height"]) if mm and mm.get("height") else 2.5
-        image_name, image_bytes = _read_image(zf, fp)
+        image_name, image_bytes = _read_image(reader, fp)
         by_name[name] = {
             "name": name, "image_name": image_name, "image_bytes": image_bytes,
             "img_w": img_w, "img_h": img_h,
@@ -181,12 +230,12 @@ def parse_openintent(zip_path: str) -> dict:
     return {"floorplans": list(by_name.values())}
 
 
-def _read_image(zf, fp):
+def _read_image(reader, fp):
     uri = fp.get("map_uri") or ""
     rel = uri.split("file://", 1)[-1] if uri.startswith("file://") else uri
-    if rel and rel in zf.namelist():
-        return rel.split("/")[-1], zf.read(rel)
-    return None, None
+    if not rel:
+        return None, None
+    return rel.split("/")[-1], reader(rel)
 
 
 def _wall(w):

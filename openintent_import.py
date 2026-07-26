@@ -519,6 +519,15 @@ class Writer:
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "create": shapes, "update": [], "remove": []})
 
+    def delete_plan(self, plan_id):
+        self.n += 1
+        if self.dry:
+            print("\n[%d] DELETE %s/project/plan/%s?socketId=%s"
+                  % (self.n, INNERSPACE_API, plan_id, self.sid))
+            return
+        self.http.request("DELETE", "%s%s/project/plan/%s?socketId=%s"
+                          % (self.base, INNERSPACE_API, plan_id, self.sid))
+
 
 def _multipart(boundary, field, filename, blob):
     ctype = "image/jpeg" if blob[:3] == b"\xff\xd8\xff" else "image/png"
@@ -550,7 +559,12 @@ def load_catalog(args, http_, base):
             title = s.get("title") or ""
             if mac and title:
                 name_to_mac[_norm(title)] = mac
-    return pid, products, name_to_mac
+    # existing plans by exact title -> [ids], for re-import-in-place (replace)
+    plans_by_title = {}
+    for pl in data.get("plans") or []:
+        if pl.get("id"):
+            plans_by_title.setdefault(pl.get("title") or "", []).append(pl["id"])
+    return pid, products, name_to_mac, plans_by_title
 
 
 def _plan_title(override, name, limit=32):
@@ -580,9 +594,10 @@ def run(args):
         legacy_login(http_, base, args.username, pw)
         csrf = apply_csrf(http_)
         print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
-    project_id, products, name_to_mac = load_catalog(args, http_, base)
+    project_id, products, name_to_mac, plans_by_title = load_catalog(args, http_, base)
     print("catalog: %d product(s), %d adopted device MAC(s); projectId=%s"
           % (len(products), len(name_to_mac), project_id))
+    replace = not args.no_replace
 
     # resolve MAC-less imported APs to real adopted hardware by name (Hamina omits
     # MACs; InnerSpace places a device by matching its MAC to an adopted AP).
@@ -605,8 +620,10 @@ def run(args):
     skipped = []
     for fp in fps:
         title = _plan_title(args.plan_title, fp["name"])
-        print("\n--- floorplan '%s' -> new plan '%s' (%gx%g px) ---"
-              % (fp["name"], title, fp["img_w"], fp["img_h"]))
+        old_ids = plans_by_title.get(title, []) if replace else []
+        verb = "replace" if old_ids else "new plan"
+        print("\n--- floorplan '%s' -> %s '%s' (%gx%g px) ---"
+              % (fp["name"], verb, title, fp["img_w"], fp["img_h"]))
         file_url = w.upload_image(fp["image_name"], fp["image_bytes"])
         plan_id, proj_id = w.create_plan(title, file_url)
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
@@ -670,6 +687,14 @@ def run(args):
                 " (%d with synthesized placeholder MAC)" % n_synth if n_synth else ""))
             w.shape_create(devices)
 
+        # re-import in place: only AFTER the new plan is fully written do we delete
+        # the old same-titled plan(s), so a mid-run failure never loses your data
+        # (also sweeps up duplicates accumulated from earlier runs).
+        if old_ids:
+            print("  replacing %d existing plan(s) titled '%s'" % (len(old_ids), title))
+            for oid in old_ids:
+                w.delete_plan(oid)
+
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))
     if skipped:
         print("skipped %d AP(s) with no InnerSpace product match: %s"
@@ -688,6 +713,9 @@ def main():
     p.add_argument("--no-verify-tls", dest="verify_tls", action="store_false")
     p.add_argument("--project-json", help="saved /project dump (offline dry-run catalog)")
     p.add_argument("--plan-title", help="override the new plan title")
+    p.add_argument("--no-replace", action="store_true",
+                   help="always create a new plan; do NOT replace/refresh an "
+                        "existing plan with the same title (old behavior)")
     p.add_argument("--commit", action="store_true",
                    help="actually write (default is a dry-run preview)")
     args = p.parse_args()

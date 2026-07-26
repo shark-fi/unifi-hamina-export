@@ -65,6 +65,7 @@ INNERSPACE_WALL_VARIANTS = {
 _WALL_ALIASES = {
     "concrete": "concrete", "cinder block": "concrete", "cinderblock": "concrete",
     "cmu": "concrete", "solid wall": "concrete",
+    "fireplace": "brick", "chimney": "brick", "masonry": "brick", "stone": "brick",
     "drywall": "drywall", "gypsum": "drywall", "gypsum board": "drywall",
     "plasterboard": "drywall", "sheetrock": "drywall", "plaster": "drywall",
     "interior wall": "drywall", "partition": "drywall",
@@ -364,6 +365,12 @@ def find_product_id(ap: dict, products: list) -> str | None:
         (ap.get("model") or "").lower(),
         MODEL_TO_SKU.get(ap.get("model") or "", "").lower(),
     }
+    # strip radio-variant suffixes the InnerSpace catalog doesn't carry
+    # (e.g. u7-pro-outdoor-internal -> u7-pro-outdoor, matching sku U7-Pro-Outdoor)
+    for m in list(wanted):
+        for suf in ("-internal", "-external", "-inner", "-outer", "-int", "-ext"):
+            if m.endswith(suf):
+                wanted.add(m[: -len(suf)])
     wanted.discard("")
     for p in products:
         for field in ("sku", "name", "shortname", "title", "abbrev", "model"):

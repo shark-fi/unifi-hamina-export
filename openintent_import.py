@@ -34,6 +34,7 @@ import io
 import json
 import os
 import sys
+from collections import defaultdict
 import urllib.error
 import urllib.request
 import uuid
@@ -519,6 +520,10 @@ class Writer:
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "create": shapes, "update": [], "remove": []})
 
+    def shape_remove(self, shapes):
+        return self.call("POST", "/shape/change",
+                         {"mode": "2D", "create": [], "update": [], "remove": shapes})
+
     def delete_plan(self, plan_id):
         self.n += 1
         if self.dry:
@@ -564,7 +569,13 @@ def load_catalog(args, http_, base):
     for pl in data.get("plans") or []:
         if pl.get("id"):
             plans_by_title.setdefault(pl.get("title") or "", []).append(pl["id"])
-    return pid, products, name_to_mac, plans_by_title
+    # shapes grouped by plan, so replacing a plan also removes its shapes (else
+    # deleting the plan orphans them -> duplicate APs in the device list)
+    shapes_by_plan = defaultdict(list)
+    for s in data.get("shapes") or []:
+        if s.get("planId"):
+            shapes_by_plan[s["planId"]].append(s)
+    return pid, products, name_to_mac, plans_by_title, dict(shapes_by_plan)
 
 
 def _plan_title(override, name, limit=32):
@@ -594,7 +605,8 @@ def run(args):
         legacy_login(http_, base, args.username, pw)
         csrf = apply_csrf(http_)
         print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
-    project_id, products, name_to_mac, plans_by_title = load_catalog(args, http_, base)
+    project_id, products, name_to_mac, plans_by_title, shapes_by_plan = load_catalog(
+        args, http_, base)
     print("catalog: %d product(s), %d adopted device MAC(s); projectId=%s"
           % (len(products), len(name_to_mac), project_id))
     replace = not args.no_replace
@@ -693,6 +705,9 @@ def run(args):
         if old_ids:
             print("  replacing %d existing plan(s) titled '%s'" % (len(old_ids), title))
             for oid in old_ids:
+                old_shapes = shapes_by_plan.get(oid, [])
+                if old_shapes:                 # remove its shapes first, else the
+                    w.shape_remove(old_shapes)  # plan delete orphans them
                 w.delete_plan(oid)
 
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))

@@ -462,6 +462,26 @@ def device_shape(plan_id, project_id, ap, product_id, scene):
     }
 
 
+def _remove_ready(s):
+    """Sanitize a shape fetched from GET /project so it passes /shape/change's
+    'remove' validation. InnerSpace validates each removed shape as a full
+    object; shapes read back from an existing project can carry incomplete
+    rotation quaternions (e.g. missing rotation.base.w), which trips a
+    'rotation.base.w Required' 400. Fill any missing quaternion component with 0.
+    """
+    s = dict(s)
+    rot = s.get("rotation")
+    if isinstance(rot, dict):
+        out = dict(rot)
+        for key in ("base", "pov"):
+            q = dict(rot.get(key) or {})
+            for c in ("w", "x", "y", "z"):
+                q.setdefault(c, 0.0)
+            out[key] = q
+        s["rotation"] = out
+    return s
+
+
 # --- Phase 4: write (dry-run by default) ---------------------------------
 class Writer:
     """Emits InnerSpace API calls. dry_run prints them; commit sends them."""
@@ -522,7 +542,8 @@ class Writer:
 
     def shape_remove(self, shapes):
         return self.call("POST", "/shape/change",
-                         {"mode": "2D", "create": [], "update": [], "remove": shapes})
+                         {"mode": "2D", "create": [], "update": [],
+                          "remove": [_remove_ready(s) for s in shapes]})
 
     def delete_plan(self, plan_id):
         self.n += 1

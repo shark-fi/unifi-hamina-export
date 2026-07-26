@@ -546,6 +546,17 @@ def load_catalog(args, http_, base):
     return pid, products, name_to_mac
 
 
+def _plan_title(override, name, limit=32):
+    """InnerSpace caps plan titles at 32 chars. Use --plan-title as-is (trimmed)
+    if given; otherwise '<name> (imported)', truncating the name to fit."""
+    if override:
+        return override[:limit]
+    suffix = " (imported)"
+    room = limit - len(suffix)
+    base = name if len(name) <= room else name[:room].rstrip("- ")
+    return base + suffix
+
+
 # --- orchestration -------------------------------------------------------
 def run(args):
     project = parse_openintent(args.openintent)
@@ -586,7 +597,7 @@ def run(args):
 
     skipped = []
     for fp in fps:
-        title = args.plan_title or ("%s (imported)" % fp["name"])
+        title = _plan_title(args.plan_title, fp["name"])
         print("\n--- floorplan '%s' -> new plan '%s' (%gx%g px) ---"
               % (fp["name"], title, fp["img_w"], fp["img_h"]))
         file_url = w.upload_image(fp["image_name"], fp["image_bytes"])

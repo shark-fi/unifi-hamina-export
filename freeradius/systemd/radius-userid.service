@@ -1,0 +1,46 @@
+[Unit]
+Description=RADIUS accounting to Palo Alto User-ID bridge
+Documentation=https://github.com/shark-fi/unifi-hamina-export
+After=network-online.target freeradius.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=radius-userid
+Group=freeradius
+
+# The API key lives in a file readable only by this service's user:
+#   install -o radius-userid -m 0400 /dev/stdin /etc/radius-userid/api.key
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/local/bin/radius_userid.py run \
+    --detail '/var/log/freeradius/radacct/userid/detail-*' \
+    --firewall https://fw1.example.edu \
+    --api-key-file /etc/radius-userid/api.key \
+    --realm-map example.edu=EXAMPLE \
+    --timeout 480 \
+    --state /var/lib/radius-userid/state.json
+
+Restart=on-failure
+RestartSec=5s
+
+# It reads accounting files, writes one state file and talks HTTPS. Nothing
+# else needs to be reachable.
+StateDirectory=radius-userid
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+ReadOnlyPaths=/var/log/freeradius /etc/radius-userid
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,48 @@
+# detail_userid — accounting feed for radius_userid.py
+#
+# Install as raddb/mods-available/detail_userid, then:
+#     ln -s ../mods-available/detail_userid raddb/mods-enabled/detail_userid
+#
+# This is a second detail writer, kept separate from the standard `detail`
+# module so that radius_userid.py can be pointed at one predictable path and
+# so that deleting or truncating its files never disturbs your real
+# accounting records.
+#
+# The bridge tails these files. If it is stopped, restarted, or the firewall
+# is unreachable, events queue up here and are picked up where it left off
+# (radius_userid.py --state remembers the offset). That is the main reason to
+# prefer this over the --listen mode.
+
+detail detail_userid {
+	# One file per day, all NASes together. radius_userid.py is pointed at
+	# the glob:  --detail '/var/log/freeradius/radacct/userid/detail-*'
+	filename = ${radacctdir}/userid/detail-%Y%m%d
+
+	# The bridge only needs to read. Run it as a user in this group rather
+	# than as root.
+	permissions = 0640
+	group = freeradius
+
+	header = "%t"
+
+	# Locking keeps a record from being read while it is half-written. The
+	# bridge also refuses to parse a record that has no terminating blank
+	# line yet, so both ends are covered.
+	locking = yes
+}
+
+# Housekeeping: these files are a queue, not an archive. Rotate them, e.g.
+# /etc/logrotate.d/freeradius-userid:
+#
+#   /var/log/freeradius/radacct/userid/detail-* {
+#       daily
+#       rotate 3
+#       missingok
+#       notifempty
+#       nocreate
+#   }
+#
+# Do not use `copytruncate` here — plain rotation (or nocreate + a new daily
+# filename) is what the bridge expects. It detects replacement and truncation
+# either way, but copytruncate can lose records written between the copy and
+# the truncate.

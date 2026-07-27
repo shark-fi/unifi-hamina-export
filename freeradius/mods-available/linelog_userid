@@ -1,0 +1,61 @@
+# linelog_userid — one-line syslog events for the PAN-OS syslog listener
+#
+# Only needed if you take the agentless syslog route instead of running
+# radius_userid.py (see "Alternative: syslog" in docs/palo-alto-user-id.md).
+# The firewall's integrated User-ID agent parses these lines directly with a
+# custom syslog parse profile — no bridge process anywhere.
+#
+# Trade-offs versus the bridge: no realm rewriting, no visitor handling, no
+# MAC-to-IP fallback, and a syslog message that is lost is simply lost. In
+# exchange there is nothing to install or keep running.
+#
+# Install as raddb/mods-available/linelog_userid, symlink into mods-enabled,
+# and call `linelog_userid` from the accounting section of your virtual
+# server (after detail, order does not matter).
+
+linelog linelog_userid {
+	destination = syslog
+	syslog_facility = local4
+	syslog_severity = info
+
+	format = ""
+
+	# Pick the message by accounting type. An empty format string logs
+	# nothing, which is what unknown types get.
+	reference = "messages.%{%{Acct-Status-Type}:-default}"
+
+	messages {
+		default = ""
+
+		# The username here is whatever the NAS reported. On an eduroam
+		# IdP that is the anonymous outer identity unless the inner name
+		# is pushed into User-Name itself (use_tunneled_reply = yes in
+		# your EAP module, and a NAS that honours it) — the firewall
+		# cannot decode the Class attribute the bridge relies on.
+		#
+		# Records with no address log "ip=" and simply fail to match the
+		# firewall's Address Regex, which is the behaviour we want.
+		Start = "eduroam-userid login user=%{User-Name} ip=%{Framed-IP-Address} mac=%{Calling-Station-Id}"
+
+		Interim-Update = "eduroam-userid login user=%{User-Name} ip=%{Framed-IP-Address} mac=%{Calling-Station-Id}"
+
+		Stop = "eduroam-userid logout user=%{User-Name} ip=%{Framed-IP-Address} mac=%{Calling-Station-Id}"
+	}
+}
+
+# Matching PAN-OS syslog parse profile (Device -> User Identification ->
+# User Mapping -> Palo Alto Networks User-ID Agent Setup -> Syslog Filters),
+# type "Regex Identifier" — one profile for login, a second for logout:
+#
+#   login profile
+#     Event Regex     eduroam-userid\ login
+#     Username Regex  user=([a-zA-Z0-9\\\._@-]+)
+#     Address Regex   ip=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})
+#
+#   logout profile
+#     Event Regex     eduroam-userid\ logout
+#     Username Regex  user=([a-zA-Z0-9\\\._@-]+)
+#     Address Regex   ip=([0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3})
+#
+# In PAN-OS regexes a literal space is written \s or escaped as above, and a
+# single profile can identify login events or logout events but never both.

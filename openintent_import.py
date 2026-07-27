@@ -215,12 +215,13 @@ def parse_openintent(zip_path: str) -> dict:
         img_h = float(px.get("length") or 0)
         mm = next((d for d in dims if d.get("unit") == "meters"), None)
         width_m = float(mm["width"]) if mm and mm.get("width") else None
+        length_m = float(mm["length"]) if mm and mm.get("length") else None
         ceiling_m = float(mm["height"]) if mm and mm.get("height") else 2.5
         image_name, image_bytes = _read_image(reader, fp)
         by_name[name] = {
             "name": name, "image_name": image_name, "image_bytes": image_bytes,
             "img_w": img_w, "img_h": img_h,
-            "width_m": width_m, "ceiling_m": ceiling_m,
+            "width_m": width_m, "length_m": length_m, "ceiling_m": ceiling_m,
             "walls": [_wall(w) for w in (fp.get("wall_segments") or [])],
             "atten": _attenuation_objects(fp),
             "aps": [],
@@ -402,6 +403,47 @@ def load_obstacle_sidecar(path: str, floorplans: list) -> dict:
         material = (obj.get("material") or obj.get("type") or obj.get("name") or "")
         out[fpn].append({"material": material, "polygon": pts})
     return dict(out)
+
+
+def obstacle_template(floorplans: list) -> dict:
+    """Build a starter --obstacles side-car: one example (a centred 'car' rect)
+    per floorplan, with correct names and each floor's pixel + metre extents in a
+    reference block, so obstacles can be placed without looking up floor names or
+    the coordinate range by hand."""
+    dims = {}
+    obstacles = []
+    for fp in floorplans:
+        wm, lm = fp.get("width_m"), fp.get("length_m")
+        dims[fp["name"]] = {
+            "pixels": {"w": fp["img_w"], "h": fp["img_h"]},
+            "meters": {"w": round(wm, 3) if wm else None,
+                       "h": round(lm, 3) if lm else None},
+        }
+        # a sensible starter: a 2.0 x 4.5 m box centred on the floor (metres) if
+        # the export carries a metre scale, else a pixel box centred on the image.
+        if wm and lm:
+            obstacles.append({
+                "floorplan": fp["name"], "material": "car", "unit": "meters",
+                "rect": {"cx": round(wm / 2.0, 3), "cy": round(lm / 2.0, 3),
+                         "w": 2.0, "h": 4.5},
+            })
+        else:
+            obstacles.append({
+                "floorplan": fp["name"], "material": "car", "unit": "pixels",
+                "rect": {"cx": round(fp["img_w"] / 2.0, 1),
+                         "cy": round(fp["img_h"] / 2.0, 1), "w": 120, "h": 260},
+            })
+    return {
+        "_comment": ("Starter obstacle side-car from --dump-obstacle-template. "
+                     "Edit/duplicate the entries, drop the ones you don't need, "
+                     "then import with --obstacles <this file>. Coordinates are "
+                     "from the image TOP-LEFT corner, x right / y down (same axes "
+                     "as the walls). Materials: car, truck, cubicles, elevator, "
+                     "foliage_light/heavy, human_crowd, machinery, server_rack, "
+                     "shelf_small/medium/warehouse (many aliases resolve)."),
+        "_floorplans": dims,
+        "obstacles": obstacles,
+    }
 
 
 # --- Phase 3: map to InnerSpace ------------------------------------------
@@ -883,12 +925,34 @@ def main():
                    help="side-car JSON of obstacle/attenuation objects to place "
                         "(Hamina's OpenIntent export omits these); see module "
                         "docstring for the format")
+    p.add_argument("--dump-obstacle-template", metavar="OUT", nargs="?", const="-",
+                   dest="dump_obstacle_template",
+                   help="write a starter --obstacles side-car (one example per "
+                        "floorplan, with names + dimensions) and exit; OUT path "
+                        "or omit for stdout")
     p.add_argument("--no-replace", action="store_true",
                    help="always create a new plan; do NOT replace/refresh an "
                         "existing plan with the same title (old behavior)")
     p.add_argument("--commit", action="store_true",
                    help="actually write (default is a dry-run preview)")
     args = p.parse_args()
+    # --dump-obstacle-template is offline (needs only the export) and exits.
+    if args.dump_obstacle_template is not None:
+        try:
+            fps = parse_openintent(args.openintent)["floorplans"]
+        except RuntimeError as e:
+            print("error:", e, file=sys.stderr)
+            sys.exit(1)
+        text = json.dumps(obstacle_template(fps), indent=2)
+        out = args.dump_obstacle_template
+        if out in (None, "-", ""):
+            print(text)
+        else:
+            with open(out, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+            print("wrote obstacle template for %d floorplan(s) -> %s"
+                  % (len(fps), out), file=sys.stderr)
+        return
     if args.commit and not args.host:
         p.error("--commit needs --host / --username / --password")
     if not args.project_json and not args.host:

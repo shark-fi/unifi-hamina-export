@@ -107,9 +107,20 @@ _ATTEN_ALIASES = {
     "machinery": "machinery", "machine": "machinery", "equipment": "machinery",
     "server rack": "server_rack", "rack": "server_rack", "servers": "server_rack",
     "shelf": "shelf_medium", "shelving": "shelf_medium",
+    "metal shelving": "shelf_medium", "wire shelving": "shelf_medium",
     "shelf small": "shelf_small", "small shelf": "shelf_small",
+    "bookshelf": "shelf_small", "bookcase": "shelf_small",
     "shelf medium": "shelf_medium", "medium shelf": "shelf_medium",
     "shelf warehouse": "shelf_warehouse", "warehouse shelf": "shelf_warehouse",
+    "pallet racking": "shelf_warehouse",
+    # household furniture / appliances -> nearest built-in variant
+    "wardrobe": "shelf_medium", "closet": "shelf_medium", "armoire": "shelf_medium",
+    "cabinet": "shelf_medium", "cupboard": "shelf_medium", "dresser": "shelf_medium",
+    "bookcases": "shelf_small",
+    "refrigerator": "machinery", "fridge": "machinery", "freezer": "machinery",
+    "appliance": "machinery", "furnace": "machinery", "water heater": "machinery",
+    "hvac": "machinery", "washer": "machinery", "dryer": "machinery",
+    "safe": "server_rack", "gun safe": "server_rack", "filing cabinet": "server_rack",
 }
 
 _ISO = "2026-01-01T00:00:00.000Z"   # placeholder timestamp; server stamps its own
@@ -311,6 +322,86 @@ def _polygon_pixels(obj) -> list:
         if len(pts) >= 3:
             return pts
     return []
+
+
+# --- optional side-car obstacles -----------------------------------------
+# Hamina's OpenIntent export omits obstacle geometry (only walls + materials),
+# so obstacles/attenuation-objects can be supplied in a small side-car JSON
+# maintained alongside the export and merged in with --obstacles. Format:
+#
+#   {"obstacles": [
+#     {"floorplan": "Floor-Plan-Size-Basement", "material": "car",
+#      "unit": "meters", "rect": {"cx": 3.0, "cy": 5.0, "w": 2.0, "h": 4.5}},
+#     {"floorplan": "Floor-Plan-Size-Basement", "material": "metal shelving",
+#      "unit": "pixels", "polygon": [[120,80],[240,80],[240,160],[120,160]]}
+#   ]}
+#
+# A bare top-level list is also accepted. `floorplan` may be omitted when the
+# export has a single floor. `unit` is "pixels" (default) or "meters" — both
+# measured from the image TOP-LEFT corner, x right / y down (same axes as
+# wall_segments). `material` maps through atten_variant() to an InnerSpace
+# attenuation-object variant. Geometry is a `polygon` ([[x,y],...] or
+# [{"x":..,"y":..},...]) or an axis-aligned `rect` {cx,cy,w,h}.
+def _sidecar_polygon(obj) -> list:
+    for key in ("polygon", "points", "vertices"):
+        seq = obj.get(key)
+        if isinstance(seq, list) and seq:
+            pts = []
+            for p in seq:
+                if isinstance(p, dict) and "x" in p and "y" in p:
+                    pts.append((float(p["x"]), float(p["y"])))
+                elif isinstance(p, (list, tuple)) and len(p) >= 2:
+                    pts.append((float(p[0]), float(p[1])))
+            return pts
+    rect = obj.get("rect")
+    if isinstance(rect, dict):
+        cx = float(rect.get("cx", rect.get("x", 0)))
+        cy = float(rect.get("cy", rect.get("y", 0)))
+        w = float(rect.get("w", rect.get("width", 0)))
+        h = float(rect.get("h", rect.get("height", 0)))
+        hw, hh = w / 2.0, h / 2.0
+        return [(cx - hw, cy - hh), (cx + hw, cy - hh),
+                (cx + hw, cy + hh), (cx - hw, cy + hh)]
+    return []
+
+
+def load_obstacle_sidecar(path: str, floorplans: list) -> dict:
+    """Parse an --obstacles side-car and return {floorplan_name: [{material,
+    polygon(pixels)}, ...]}, ready to merge into fp['atten']. Raises RuntimeError
+    with an actionable message on any malformed entry."""
+    raw = json.load(open(path, encoding="utf-8"))
+    items = raw.get("obstacles") if isinstance(raw, dict) else raw
+    if not isinstance(items, list):
+        raise RuntimeError('obstacle side-car must be a JSON list or '
+                           '{"obstacles": [...]}')
+    by_name = {fp["name"]: fp for fp in floorplans}
+    default_fp = floorplans[0]["name"] if len(floorplans) == 1 else None
+    out: dict = defaultdict(list)
+    for i, obj in enumerate(items):
+        if not isinstance(obj, dict):
+            raise RuntimeError("obstacle #%d must be an object" % i)
+        fpn = obj.get("floorplan") or obj.get("floorplan_name") or default_fp
+        fp = by_name.get(fpn)
+        if fp is None:
+            raise RuntimeError("obstacle #%d: floorplan %r not found (have: %s)"
+                               % (i, fpn, ", ".join(by_name) or "none"))
+        pts = _sidecar_polygon(obj)
+        if len(pts) < 3:
+            raise RuntimeError("obstacle #%d (%s) needs a polygon of >=3 points "
+                               "or a rect {cx,cy,w,h}" % (i, fpn))
+        unit = (obj.get("unit") or "pixels").lower()
+        if unit in ("meters", "meter", "m"):
+            spm = (fp["img_w"] / fp["width_m"]) if fp.get("width_m") else None
+            if not spm:
+                raise RuntimeError("obstacle #%d uses meters but floorplan %r "
+                                   "has no metre scale in the export" % (i, fpn))
+            pts = [(x * spm, y * spm) for x, y in pts]
+        elif unit not in ("pixels", "pixel", "px"):
+            raise RuntimeError("obstacle #%d: unit must be 'pixels' or 'meters', "
+                               "got %r" % (i, unit))
+        material = (obj.get("material") or obj.get("type") or obj.get("name") or "")
+        out[fpn].append({"material": material, "polygon": pts})
+    return dict(out)
 
 
 # --- Phase 3: map to InnerSpace ------------------------------------------
@@ -635,6 +726,18 @@ def run(args):
           % (len(fps), sum(len(f["walls"]) for f in fps),
              sum(len(f["aps"]) for f in fps), args.openintent))
 
+    # optional side-car obstacles (Hamina's export omits obstacle geometry)
+    if args.obstacles:
+        sidecar = load_obstacle_sidecar(args.obstacles, fps)
+        added = 0
+        for fp in fps:
+            extra = sidecar.get(fp["name"]) or []
+            if extra:
+                fp["atten"] = (fp.get("atten") or []) + extra
+                added += len(extra)
+        print("obstacle side-car: merged %d object(s) from %s"
+              % (added, args.obstacles))
+
     http_, base, need_login = None, "", not args.project_json or args.commit
     if need_login:
         base = args.host.rstrip("/")
@@ -776,6 +879,10 @@ def main():
     p.add_argument("--unit", choices=["imperial", "metric"], default="imperial",
                    help="project display unit committed when setting scale "
                         "(default: imperial)")
+    p.add_argument("--obstacles", metavar="JSON",
+                   help="side-car JSON of obstacle/attenuation objects to place "
+                        "(Hamina's OpenIntent export omits these); see module "
+                        "docstring for the format")
     p.add_argument("--no-replace", action="store_true",
                    help="always create a new plan; do NOT replace/refresh an "
                         "existing plan with the same title (old behavior)")

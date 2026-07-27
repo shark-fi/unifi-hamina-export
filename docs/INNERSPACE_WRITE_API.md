@@ -86,6 +86,31 @@ Built-in variants: `car`, `cubicles`, `elevator`, `foliage_heavy`, `foliage_ligh
   fields: `id,name,attenuation,color,topHeight,bottomHeight,variant:"custom",
   variantKey,isCustom,isDeleted,renderOrder,projectId`.
 
+## Obstacle side-car (`--obstacles`)
+
+Hamina's OpenIntent export writes only walls + wall materials — never obstacle
+geometry — so `openintent_import.py` accepts an optional side-car JSON of
+obstacle/attenuation objects, merged onto the matching floorplan at import and
+placed as `attenuationObject` shapes. See `obstacles.example.json`.
+
+```json
+{ "obstacles": [
+  { "floorplan": "Basement", "material": "car",
+    "unit": "meters", "rect": { "cx": 3.0, "cy": 5.0, "w": 2.0, "h": 4.5 } },
+  { "floorplan": "Basement", "material": "metal shelving",
+    "unit": "pixels", "polygon": [[120,80],[240,80],[240,160],[120,160]] }
+] }
+```
+
+- `floorplan` — name as it appears in the export; omit if the export is single-floor.
+- `material` — mapped to a built-in variant (above); many plain-English aliases
+  resolve (`wardrobe`/`fridge`/`rack`/…), unknown → `cubicles` with a warning.
+- `unit` — `pixels` (default) or `meters`, both from the image **top-left**
+  corner, x right / y down (same axes as `wall_segments`); metres are scaled by
+  the floorplan's own px/m.
+- geometry — a `polygon` (`[[x,y],…]` or `[{x,y},…]`, ≥3 pts) or axis-aligned
+  `rect` `{cx,cy,w,h}`. A bare top-level list is also accepted.
+
 ## Plan management
 
 - `PATCH /project/plan/order?socketId=…` — `[{"id":"<plan>","ordering":0}, …]`

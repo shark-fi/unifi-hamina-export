@@ -1,0 +1,41 @@
+{
+  "_comment": [
+    "Side-car obstacle/attenuation objects for openintent_import.py --obstacles.",
+    "Hamina's OpenIntent export writes only walls + wall materials, not obstacle",
+    "geometry, so obstacles (cars, shelving, appliances, foliage, ...) are supplied",
+    "here and merged onto the matching floorplan at import time.",
+    "",
+    "Each entry:",
+    "  floorplan : floorplan name as it appears in the export (omit if single-floor)",
+    "  material  : obstacle material/type; mapped to an InnerSpace attenuation",
+    "              variant (car, truck, cubicles, elevator, foliage_light/heavy,",
+    "              human_crowd, machinery, server_rack, shelf_small/medium/warehouse).",
+    "              Many plain-English aliases resolve (wardrobe, fridge, rack, ...);",
+    "              anything unknown falls back to cubicles with a warning.",
+    "  unit      : 'pixels' (default) or 'meters' — both measured from the image",
+    "              TOP-LEFT corner, x right / y down (same axes as wall_segments).",
+    "  geometry  : either a 'polygon' ([[x,y],...] or [{\"x\":..,\"y\":..},...], >=3 pts)",
+    "              or an axis-aligned 'rect' {cx,cy,w,h}.",
+    "Keys starting with '_' are ignored."
+  ],
+  "obstacles": [
+    {
+      "floorplan": "Floor-Plan-Size-Basement",
+      "material": "car",
+      "unit": "meters",
+      "rect": { "cx": 3.0, "cy": 5.0, "w": 2.0, "h": 4.5 }
+    },
+    {
+      "floorplan": "Floor-Plan-Size-Basement",
+      "material": "metal shelving",
+      "unit": "pixels",
+      "polygon": [[120, 80], [240, 80], [240, 160], [120, 160]]
+    },
+    {
+      "floorplan": "Floor-Plan-Size-Upstairs",
+      "material": "wardrobe",
+      "unit": "meters",
+      "rect": { "cx": 6.0, "cy": 2.0, "w": 1.0, "h": 2.0 }
+    }
+  ]
+}

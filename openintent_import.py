@@ -8,8 +8,17 @@ shapes -> create device shapes. See docs/INNERSPACE_WRITE_API.md and issue #2.
 Pipeline:  parse (OpenIntent)  ->  map (coords / model / wall)  ->  write (InnerSpace)
 
 SAFETY: defaults to --dry-run, which prints the exact API calls it WOULD make
-(no writes). Pass --commit to actually write. Even --commit only ever CREATEs a
-new plan; it never edits or deletes existing plans.
+(no writes). Pass --commit to actually write. By default a --commit re-imports
+in place: it writes the new plan in full FIRST, then deletes any previous
+same-titled plan(s) (so a mid-run failure never loses data, and duplicates from
+earlier runs are swept up). Pass --no-replace to always create a fresh plan and
+leave existing plans untouched.
+
+APs: Hamina's export omits MACs, so each AP binds to real hardware by matching
+its NAME to an adopted UniFi device (else a placeholder MAC is synthesized), and
+renders as the product whose MODEL matches the InnerSpace catalog (else it is
+skipped). Scale is set from the export's metre dimensions. Obstacles aren't in
+the export; supply them via --obstacles (see --dump-obstacle-template).
 
 Examples:
     # offline dry-run (no console needed): map + preview the calls, using a saved

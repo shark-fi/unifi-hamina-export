@@ -107,6 +107,77 @@ OpenIntent converter tested against Hamina's importer.
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
 coordinates, and per-band channel / TX power.
 
+## Reverse: import Hamina → UniFi InnerSpace
+
+`openintent_import.py` goes the other way: it reads a Hamina OpenIntent zip and
+writes it into an InnerSpace project — floor-plan image, walls (with materials),
+AP placements, and real-world scale. Full write-API reference:
+[`docs/INNERSPACE_WRITE_API.md`](docs/INNERSPACE_WRITE_API.md).
+
+```bash
+# offline dry-run — parse + preview the exact API calls, no console needed
+python3 openintent_import.py home.zip --project-json innerspace_project.json
+
+# live dry-run against the console (fetches the product catalog itself)
+python3 openintent_import.py home.zip --host https://192.168.1.1 \
+    --username <local-admin> --no-verify-tls
+
+# actually write it in
+python3 openintent_import.py home.zip --host https://192.168.1.1 \
+    --username <local-admin> --no-verify-tls --commit
+```
+
+It defaults to a **dry-run** (prints the calls it *would* make); nothing is
+written until `--commit`. Same local-admin login note as above. Writes need a
+CSRF token, taken automatically from the login cookie.
+
+### How APs resolve — name *and* model do different jobs
+
+Hamina's OpenIntent export carries no MACs, and InnerSpace places a device only
+by matching an **adopted** device's MAC. So the importer uses two keys:
+
+| Aspect | Resolved by | If no match |
+|---|---|---|
+| Which physical AP it binds to, and placement | AP **name** vs your adopted UniFi devices (case/punctuation-insensitive) | placed with a synthesized placeholder MAC — shown, but not tied to live hardware |
+| Product type (icon, radios, antenna) | AP **model** vs the InnerSpace product catalog (with alias + `-internal`/`-external` suffix stripping) | AP is **skipped** — can't place without a product id |
+
+Practical upshot: **keep your Hamina AP names identical to the UniFi device
+names** and they bind to the real APs; the model just has to exist in the
+InnerSpace catalog. The run prints how many matched (`matched N AP(s) to adopted
+MACs by name`) and lists anything skipped.
+
+### Walls, scale, re-import
+
+- **Walls** carry their material: each OpenIntent `wall_type` maps to an
+  InnerSpace variant (concrete, drywall, drywall_heavy, door_wood/glass/metal,
+  window, brick, …); unrecognized labels default to drywall with a warning.
+- **Scale** is set automatically from the export's metre dimensions, so plans
+  come in pre-scaled (no "Set Scale" prompt). `--unit imperial|metric` sets the
+  project display unit (default imperial).
+- **Re-import in place** is the default: re-running replaces the previous
+  same-titled plan(s) *after* the new one is fully written (a mid-run failure
+  never loses data), which also sweeps up duplicates from earlier runs. Pass
+  `--no-replace` to always create a fresh plan instead.
+
+### Obstacles side-car
+
+Hamina's export omits obstacle geometry (walls + materials only), so obstacles
+(cars, shelving, appliances, foliage, …) are supplied in an optional side-car
+JSON and placed as attenuation objects:
+
+```bash
+# scaffold a starter side-car with your floor names + dimensions
+python3 openintent_import.py home.zip --dump-obstacle-template obstacles.json
+# ...edit it, then place them on import
+python3 openintent_import.py home.zip --host … --commit --obstacles obstacles.json
+```
+
+Each entry takes a `floorplan`, a `material` (many plain-English aliases
+resolve), a `unit` (`pixels` or `meters`, from the image top-left), and either a
+`rect {cx,cy,w,h}` or an explicit `polygon`. See
+[`obstacles.example.json`](obstacles.example.json) and the write-API doc for the
+full format.
+
 ## Notes
 
 - Wall attenuation values in `WALL_VARIANTS` are defaults; Hamina maps wall

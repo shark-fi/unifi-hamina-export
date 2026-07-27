@@ -111,6 +111,11 @@ placed as `attenuationObject` shapes. See `obstacles.example.json`.
 - geometry — a `polygon` (`[[x,y],…]` or `[{x,y},…]`, ≥3 pts) or axis-aligned
   `rect` `{cx,cy,w,h}`. A bare top-level list is also accepted.
 
+Generate a starter side-car (correct floor names + each floor's pixel/metre
+extents, one example `car` per floor) with
+`openintent_import.py <export.zip> --dump-obstacle-template [OUT]` (OUT path, or
+omit for stdout) — offline, no console needed.
+
 ## Plan management
 
 - `PATCH /project/plan/order?socketId=…` — `[{"id":"<plan>","ordering":0}, …]`

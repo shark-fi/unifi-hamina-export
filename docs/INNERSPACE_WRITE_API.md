@@ -106,7 +106,13 @@ export direction).
 2. **Verify writes** by re-GETting `/project?mode=2D` (POST responses are empty).
 3. **productId mapping** — build OpenIntent `model` → InnerSpace `productId` from
    the `products[]` catalog (reverse of `INNERSPACE_SKU_ALIASES`).
-4. **Scale** — setting a plan's scale line wasn't in this capture; determine how
-   (likely a `scale`-type shape via `/shape/change`, or a field on the plan).
+4. **Scale** — RESOLVED (captured from the real Set-Scale UI flow). A plan's
+   `scale` shape must be **activated**, not merely created: re-send it via
+   `POST /shape/change` with a **top-level `"type":"scale"`** marker in the
+   `update` array — `{"mode":"2D","type":"scale","create":[],"update":[<scale
+   shape>],"remove":[]}`. Creating the shape alone leaves the plan prompting
+   "Set Scale"; the top-level `type` is what makes InnerSpace recompute the
+   plan's metres/unit. A cosmetic `PATCH /project {"unit":"imperial"|"metric"}`
+   fires alongside it in the UI but is not required for the scale to take.
 5. **Safety** — write to a **new** plan by default, `--dry-run` first, never
    clobber an existing plan.

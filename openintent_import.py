@@ -540,6 +540,16 @@ class Writer:
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "create": shapes, "update": [], "remove": []})
 
+    def set_scale(self, scale_obj):
+        """Activate a plan's scale. Creating the `scale` shape alone does NOT
+        make InnerSpace recompute the plan's active metres/unit — that only
+        happens when the shape is re-sent in the `update` array with a
+        top-level `"type":"scale"` marker (captured from the real Set-Scale
+        UI flow). Without this the plan keeps prompting 'Set Scale'."""
+        return self.call("POST", "/shape/change",
+                         {"mode": "2D", "type": "scale",
+                          "create": [], "update": [scale_obj], "remove": []})
+
     def shape_remove(self, shapes):
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "create": [], "update": [],
@@ -661,10 +671,16 @@ def run(args):
         plan_id, proj_id = w.create_plan(title, file_url)
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
 
-        # set the plan scale first so coverage renders accurately (no "Set Scale")
+        # set the plan scale first so coverage renders accurately (no "Set Scale").
+        # Two steps, mirroring the real UI: (1) create the `scale` shape on the
+        # plan, then (2) re-send it via /shape/change with a top-level
+        # "type":"scale" marker, which is what actually triggers InnerSpace to
+        # recompute the plan's metres/unit.
         if fp.get("width_m"):
-            w.shape_create([scale_shape(plan_id, proj_id, fp["img_w"],
-                                        fp["width_m"], fp["ceiling_m"])])
+            sc = scale_shape(plan_id, proj_id, fp["img_w"],
+                             fp["width_m"], fp["ceiling_m"])
+            w.shape_create([sc])
+            w.set_scale(sc)
         else:
             print("  (no metres dimension in the export -> scale left unset)")
 

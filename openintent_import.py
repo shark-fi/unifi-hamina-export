@@ -540,12 +540,19 @@ class Writer:
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "create": shapes, "update": [], "remove": []})
 
+    def set_unit(self, unit):
+        """PATCH /project {"unit": ...} — commits the project display unit.
+        Captured immediately before the scale `shape/change`; the plan is only
+        treated as scaled once the unit is committed alongside the scale shape."""
+        return self.call("PATCH", "/project", {"unit": unit})
+
     def set_scale(self, scale_obj):
         """Activate a plan's scale. Creating the `scale` shape alone does NOT
         make InnerSpace recompute the plan's active metres/unit — that only
         happens when the shape is re-sent in the `update` array with a
         top-level `"type":"scale"` marker (captured from the real Set-Scale
-        UI flow). Without this the plan keeps prompting 'Set Scale'."""
+        UI flow), preceded by the set_unit() PATCH. Without this the plan keeps
+        prompting 'Set Scale'."""
         return self.call("POST", "/shape/change",
                          {"mode": "2D", "type": "scale",
                           "create": [], "update": [scale_obj], "remove": []})
@@ -680,6 +687,7 @@ def run(args):
             sc = scale_shape(plan_id, proj_id, fp["img_w"],
                              fp["width_m"], fp["ceiling_m"])
             w.shape_create([sc])
+            w.set_unit(args.unit)
             w.set_scale(sc)
         else:
             print("  (no metres dimension in the export -> scale left unset)")
@@ -765,6 +773,9 @@ def main():
     p.add_argument("--no-verify-tls", dest="verify_tls", action="store_false")
     p.add_argument("--project-json", help="saved /project dump (offline dry-run catalog)")
     p.add_argument("--plan-title", help="override the new plan title")
+    p.add_argument("--unit", choices=["imperial", "metric"], default="imperial",
+                   help="project display unit committed when setting scale "
+                        "(default: imperial)")
     p.add_argument("--no-replace", action="store_true",
                    help="always create a new plan; do NOT replace/refresh an "
                         "existing plan with the same title (old behavior)")

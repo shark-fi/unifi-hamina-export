@@ -44,8 +44,9 @@ grid when no floor plans exist at all.
 
 ## How InnerSpace works
 
-Undocumented, reverse-engineered from the InnerSpace UI bundle. Read-only use
-only; it can change with any InnerSpace release.
+Undocumented, reverse-engineered from the InnerSpace UI bundle; it can change
+with any InnerSpace release. The exporter only ever reads. The optional
+importer (below) writes, but only when you pass `--commit`.
 
 InnerSpace is a separate controller app (port 17080, `apiPrefix:
 /proxy/innerspace/`). Its UI is not served from the console — it loads from
@@ -65,7 +66,8 @@ Ubiquiti's public CDN, which `GET /api/system` reveals:
 `GET /proxy/innerspace/api/project?mode=2D` returns the entire project.
 Others: `/api/project/plan{,/upload,/order}`, `/api/project/wall-type`,
 `/api/project/attenuation-object-type`, `/api/stats`, and `/api/shape/change`
-(a write endpoint — this tool never calls it).
+(a write endpoint — used only by `openintent_import.py`, and only with
+`--commit`; `unifi_export.py` never calls it).
 
 ### Data model
 
@@ -107,6 +109,77 @@ OpenIntent converter tested against Hamina's importer.
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
 coordinates, and per-band channel / TX power.
 
+## Reverse: import Hamina → UniFi InnerSpace
+
+`openintent_import.py` goes the other way: it reads a Hamina OpenIntent zip and
+writes it into an InnerSpace project — floor-plan image, walls (with materials),
+AP placements, and real-world scale. Full write-API reference:
+[`docs/INNERSPACE_WRITE_API.md`](docs/INNERSPACE_WRITE_API.md).
+
+```bash
+# offline dry-run — parse + preview the exact API calls, no console needed
+python3 openintent_import.py home.zip --project-json innerspace_project.json
+
+# live dry-run against the console (fetches the product catalog itself)
+python3 openintent_import.py home.zip --host https://192.168.1.1 \
+    --username <local-admin> --no-verify-tls
+
+# actually write it in
+python3 openintent_import.py home.zip --host https://192.168.1.1 \
+    --username <local-admin> --no-verify-tls --commit
+```
+
+It defaults to a **dry-run** (prints the calls it *would* make); nothing is
+written until `--commit`. Same local-admin login note as above. Writes need a
+CSRF token, taken automatically from the login cookie.
+
+### How APs resolve — name *and* model do different jobs
+
+Hamina's OpenIntent export carries no MACs, and InnerSpace places a device only
+by matching an **adopted** device's MAC. So the importer uses two keys:
+
+| Aspect | Resolved by | If no match |
+|---|---|---|
+| Which physical AP it binds to, and placement | AP **name** vs your adopted UniFi devices (case/punctuation-insensitive) | placed with a synthesized placeholder MAC — shown, but not tied to live hardware |
+| Product type (icon, radios, antenna) | AP **model** vs the InnerSpace product catalog (with alias + `-internal`/`-external` suffix stripping) | AP is **skipped** — can't place without a product id |
+
+Practical upshot: **keep your Hamina AP names identical to the UniFi device
+names** and they bind to the real APs; the model just has to exist in the
+InnerSpace catalog. The run prints how many matched (`matched N AP(s) to adopted
+MACs by name`) and lists anything skipped.
+
+### Walls, scale, re-import
+
+- **Walls** carry their material: each OpenIntent `wall_type` maps to an
+  InnerSpace variant (concrete, drywall, drywall_heavy, door_wood/glass/metal,
+  window, brick, …); unrecognized labels default to drywall with a warning.
+- **Scale** is set automatically from the export's metre dimensions, so plans
+  come in pre-scaled (no "Set Scale" prompt). `--unit imperial|metric` sets the
+  project display unit (default imperial).
+- **Re-import in place** is the default: re-running replaces the previous
+  same-titled plan(s) *after* the new one is fully written (a mid-run failure
+  never loses data), which also sweeps up duplicates from earlier runs. Pass
+  `--no-replace` to always create a fresh plan instead.
+
+### Obstacles side-car
+
+Hamina's export omits obstacle geometry (walls + materials only), so obstacles
+(cars, shelving, appliances, foliage, …) are supplied in an optional side-car
+JSON and placed as attenuation objects:
+
+```bash
+# scaffold a starter side-car with your floor names + dimensions
+python3 openintent_import.py home.zip --dump-obstacle-template obstacles.json
+# ...edit it, then place them on import
+python3 openintent_import.py home.zip --host … --commit --obstacles obstacles.json
+```
+
+Each entry takes a `floorplan`, a `material` (many plain-English aliases
+resolve), a `unit` (`pixels` or `meters`, from the image top-left), and either a
+`rect {cx,cy,w,h}` or an explicit `polygon`. See
+[`obstacles.example.json`](obstacles.example.json) and the write-API doc for the
+full format.
+
 ## Notes
 
 - Wall attenuation values in `WALL_VARIANTS` are defaults; Hamina maps wall
@@ -115,7 +188,8 @@ coordinates, and per-band channel / TX power.
   `--ap-height` (default 2.5 m).
 - TLS verification is off by default for local consoles (self-signed certs).
   `--verify-tls` enables it.
-- Every call this tool makes is a GET.
+- Every call `unifi_export.py` makes is a GET. Writes happen only in
+  `openintent_import.py`, and only when you pass `--commit`.
 
 ## Disclaimer
 
@@ -129,10 +203,18 @@ order to interoperate with it. They carry no stability guarantee and may
 change or disappear in any UniFi release — if an update breaks this tool,
 that is expected, not a defect on Ubiquiti's part.
 
-This tool only ever issues HTTP GET requests. It reads floor plans, device
-placements and radio state; it never creates, modifies or deletes anything on
-a console. The write endpoints that exist in the InnerSpace API are
-deliberately not called.
+The exporter (`unifi_export.py`) only ever issues HTTP GET requests. It reads
+floor plans, device placements and radio state; it never creates, modifies or
+deletes anything on a console.
+
+The importer (`openintent_import.py`) is the one component that writes, and
+only to bring a Hamina floor plan back into InnerSpace. It defaults to a
+**dry-run** that prints the exact calls it would make and writes nothing; a
+write happens only when you pass `--commit`. Its writes are confined to
+InnerSpace floor plans — creating a plan and its wall / device / obstacle
+shapes, and replacing a plan it previously created with the same title. It
+does not touch device configuration, network settings or anything outside the
+floor plan it is importing.
 
 Use it on equipment you own or are authorised to administer. It requires
 credentials for that console and offers no way to reach one you cannot

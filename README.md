@@ -44,8 +44,9 @@ grid when no floor plans exist at all.
 
 ## How InnerSpace works
 
-Undocumented, reverse-engineered from the InnerSpace UI bundle. Read-only use
-only; it can change with any InnerSpace release.
+Undocumented, reverse-engineered from the InnerSpace UI bundle; it can change
+with any InnerSpace release. The exporter only ever reads. The optional
+importer (below) writes, but only when you pass `--commit`.
 
 InnerSpace is a separate controller app (port 17080, `apiPrefix:
 /proxy/innerspace/`). Its UI is not served from the console — it loads from
@@ -65,7 +66,8 @@ Ubiquiti's public CDN, which `GET /api/system` reveals:
 `GET /proxy/innerspace/api/project?mode=2D` returns the entire project.
 Others: `/api/project/plan{,/upload,/order}`, `/api/project/wall-type`,
 `/api/project/attenuation-object-type`, `/api/stats`, and `/api/shape/change`
-(a write endpoint — this tool never calls it).
+(a write endpoint — used only by `openintent_import.py`, and only with
+`--commit`; `unifi_export.py` never calls it).
 
 ### Data model
 
@@ -186,7 +188,8 @@ full format.
   `--ap-height` (default 2.5 m).
 - TLS verification is off by default for local consoles (self-signed certs).
   `--verify-tls` enables it.
-- Every call this tool makes is a GET.
+- Every call `unifi_export.py` makes is a GET. Writes happen only in
+  `openintent_import.py`, and only when you pass `--commit`.
 
 ## Disclaimer
 
@@ -200,10 +203,18 @@ order to interoperate with it. They carry no stability guarantee and may
 change or disappear in any UniFi release — if an update breaks this tool,
 that is expected, not a defect on Ubiquiti's part.
 
-This tool only ever issues HTTP GET requests. It reads floor plans, device
-placements and radio state; it never creates, modifies or deletes anything on
-a console. The write endpoints that exist in the InnerSpace API are
-deliberately not called.
+The exporter (`unifi_export.py`) only ever issues HTTP GET requests. It reads
+floor plans, device placements and radio state; it never creates, modifies or
+deletes anything on a console.
+
+The importer (`openintent_import.py`) is the one component that writes, and
+only to bring a Hamina floor plan back into InnerSpace. It defaults to a
+**dry-run** that prints the exact calls it would make and writes nothing; a
+write happens only when you pass `--commit`. Its writes are confined to
+InnerSpace floor plans — creating a plan and its wall / device / obstacle
+shapes, and replacing a plan it previously created with the same title. It
+does not touch device configuration, network settings or anything outside the
+floor plan it is importing.
 
 Use it on equipment you own or are authorised to administer. It requires
 credentials for that console and offers no way to reach one you cannot

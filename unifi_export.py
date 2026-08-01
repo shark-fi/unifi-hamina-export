@@ -243,9 +243,19 @@ def legacy_login(http_, base, username, password):
         if "HTTP 401" in str(e) or "HTTP 403" in str(e):
             die("login rejected (bad username/password?). Use a local admin "
                 "account, not a ui.com cloud account with MFA.")
-    # Classic software controller / CloudKey Gen1
-    http_.request("POST", f"{base}/api/login",
-                  body={"username": username, "password": password})
+        first = str(e)
+    # Classic software controller / CloudKey Gen1. If this fails too, report BOTH
+    # attempts: reporting only this one is actively misleading, since a UniFi OS
+    # console fails here for the mundane reason that it has no /api/login at all.
+    try:
+        http_.request("POST", f"{base}/api/login",
+                      body={"username": username, "password": password})
+    except RuntimeError as e:
+        die("could not log in to %s.\n  UniFi OS  (/api/auth/login): %s\n"
+            "  classic   (/api/login):      %s\n"
+            "  -> check the host really is the UniFi console (GET /api/system "
+            "identifies one), and use a local admin account."
+            % (base, first, e))
     return ""
 
 

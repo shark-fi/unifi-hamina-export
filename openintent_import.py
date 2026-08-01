@@ -57,6 +57,7 @@ from unifi_export import (
 )
 
 INNERSPACE_API = "/proxy/innerspace/api"
+NETWORK_API = "/proxy/network/api"      # authoritative adopted-device list
 # OpenIntent wall_type label -> InnerSpace variant (reverse of the exporter's own
 # labels; exact match tried first).
 WALL_LABEL_TO_VARIANT = {label: variant for variant, (label, _att) in WALL_VARIANTS.items()}
@@ -279,6 +280,17 @@ def _synth_mac(name: str) -> str:
     from the AP name, for exports (like Hamina's) that omit MACs. `02` prefix =
     locally-administered/unicast; deterministic so re-imports stay stable."""
     return "02" + hashlib.md5(name.encode("utf-8")).hexdigest().upper()[:10]
+
+
+def _is_placeholder_mac(mac: str) -> bool:
+    """True for a MAC we synthesized (locally-administered bit set). Real UniFi
+    hardware is always globally administered, so this cleanly tells our own
+    placeholders apart from adopted devices — which matters when re-importing,
+    since the previous run's device shapes are still in the project."""
+    try:
+        return bool(int(mac[:2], 16) & 0x02)
+    except (ValueError, IndexError):
+        return False
 
 
 def _ap_pixel(ap):
@@ -725,6 +737,29 @@ def _multipart(boundary, field, filename, blob):
     return head + blob + tail
 
 
+def fetch_adopted_macs(http_, base, site):
+    """name -> MAC for every adopted AP, from the Network app. A GET.
+
+    InnerSpace only carries a device *shape* for a device someone placed, so the
+    project alone can't tell us the MAC of an AP that has never been on a plan —
+    exactly the APs an import most needs to bind. The Network app knows them all.
+    Best effort: a console that answers differently just leaves us with whatever
+    the project's own shapes gave us."""
+    try:
+        data = http_.get_json("%s%s/s/%s/stat/device"
+                              % (base, NETWORK_API, site)).get("data") or []
+    except Exception as e:                      # noqa: BLE001 - any failure is non-fatal
+        print("  (adopted-device lookup failed: %s -- falling back to placed shapes)" % e)
+        return {}
+    out = {}
+    for d in data:
+        mac = (d.get("mac") or "").replace(":", "").upper()
+        name = d.get("name") or ""
+        if mac and name and not _is_placeholder_mac(mac):
+            out[_norm(name)] = mac
+    return out
+
+
 # --- catalog (product list + projectId + adopted device name->MAC) --------
 def load_catalog(args, http_, base):
     if args.project_json:
@@ -735,15 +770,23 @@ def load_catalog(args, http_, base):
     products = data.get("products") or []
     pid = ((data.get("project") or {}).get("id")
            or (data.get("plans") or [{}])[0].get("projectId") or "<project-id>")
-    # existing device shapes carry the real adopted MAC + title; build name->MAC
-    # so imported APs (which Hamina exports WITHOUT MACs) resolve to real hardware.
+    # Build name->MAC so imported APs (which Hamina exports WITHOUT MACs) resolve
+    # to real hardware. Existing device shapes carry a MAC + title, but on a
+    # RE-IMPORT they also include the shapes our own previous run created, whose
+    # MACs are synthesized placeholders. Taking those at face value re-binds each
+    # AP to its placeholder forever: the plan looks right, but the real adopted
+    # device is never placed and keeps showing up as available to add. So skip
+    # placeholders here, and prefer the Network app's adopted list where we can
+    # reach it — that is the same list InnerSpace itself matches against.
     name_to_mac = {}
     for s in data.get("shapes") or []:
         if s.get("type") == "device":
             mac = ((s.get("meta") or {}).get("mac") or "").replace(":", "").upper()
             title = s.get("title") or ""
-            if mac and title:
+            if mac and title and not _is_placeholder_mac(mac):
                 name_to_mac[_norm(title)] = mac
+    if http_ is not None:
+        name_to_mac.update(fetch_adopted_macs(http_, base, args.site))
     # existing plans by exact title -> [ids], for re-import-in-place (replace)
     plans_by_title = {}
     for pl in data.get("plans") or []:
@@ -805,7 +848,7 @@ def run(args):
 
     # resolve MAC-less imported APs to real adopted hardware by name (Hamina omits
     # MACs; InnerSpace places a device by matching its MAC to an adopted AP).
-    n_matched = 0
+    n_matched, unbound = 0, []
     for fp in fps:
         for ap in fp["aps"]:
             if ap.get("mac_synth"):
@@ -813,8 +856,18 @@ def run(args):
                 if real:
                     ap["mac"], ap["mac_synth"], ap["mac_matched"] = real, False, True
                     n_matched += 1
+                else:
+                    unbound.append(ap["name"])
     if n_matched:
         print("matched %d AP(s) to adopted MACs by name" % n_matched)
+    if unbound:
+        # worth saying loudly: these get placed, but InnerSpace won't consider the
+        # real device placed, so it keeps offering it in the "add devices" list
+        print("%d AP(s) did NOT match an adopted device by name: %s"
+              % (len(unbound), ", ".join(sorted(unbound))))
+        print("  -> they are placed with a placeholder MAC, and the real device "
+              "will still be listed as available to add.")
+        print("  -> rename them in Hamina (or in UniFi) so the names match exactly.")
 
     socket_id = str(uuid.uuid4())
     w = Writer(http_, base, socket_id, dry_run=not args.commit)
@@ -822,9 +875,11 @@ def run(args):
                             else "DRY-RUN (no writes; showing planned calls)"))
 
     skipped = []
-    for fp in fps:
+    deleted_plans: set = set()   # --plan-title can point every floorplan at one
+    for fp in fps:                # title; never try to delete the same plan twice
         title = _plan_title(args.plan_title, fp["name"])
-        old_ids = plans_by_title.get(title, []) if replace else []
+        old_ids = [i for i in (plans_by_title.get(title, []) if replace else [])
+                   if i not in deleted_plans]
         verb = "replace" if old_ids else "new plan"
         print("\n--- floorplan '%s' -> %s '%s' (%gx%g px) ---"
               % (fp["name"], verb, title, fp["img_w"], fp["img_h"]))
@@ -837,6 +892,7 @@ def run(args):
         # plan, then (2) re-send it via /shape/change with a top-level
         # "type":"scale" marker, which is what actually triggers InnerSpace to
         # recompute the plan's metres/unit.
+        sc = None
         if fp.get("width_m"):
             sc = scale_shape(plan_id, proj_id, fp["img_w"],
                              fp["width_m"], fp["ceiling_m"])
@@ -891,6 +947,21 @@ def run(args):
             devices.append(device_shape(
                 plan_id, proj_id, ap, pid,
                 to_scene(ap["x"], ap["y"], fp["img_w"], fp["img_h"])))
+        # A device can only be placed once, so free the real MACs from the plan
+        # we are replacing BEFORE re-placing them on the new one — otherwise the
+        # create can be rejected as already-placed and the AP silently stays in
+        # the "add devices" list. Only the device shapes go early; the old plan's
+        # image and walls stay until the new plan is complete, so an interrupted
+        # run still can't leave you with nothing.
+        freed = set()
+        if old_ids and devices:
+            stale = [s for oid in old_ids for s in shapes_by_plan.get(oid, [])
+                     if s.get("type") == "device" and s.get("id")]
+            if stale:
+                print("  freeing %d device(s) from the plan(s) being replaced"
+                      % len(stale))
+                w.shape_remove(stale)
+                freed = {s["id"] for s in stale}
         if devices:
             n_synth = sum(1 for ap in fp["aps"] if ap.get("mac_synth"))
             print("  devices: %d AP(s)%s" % (
@@ -904,10 +975,19 @@ def run(args):
         if old_ids:
             print("  replacing %d existing plan(s) titled '%s'" % (len(old_ids), title))
             for oid in old_ids:
-                old_shapes = shapes_by_plan.get(oid, [])
+                old_shapes = [s for s in shapes_by_plan.get(oid, [])
+                              if s.get("id") not in freed]   # devices already gone
                 if old_shapes:                 # remove its shapes first, else the
                     w.shape_remove(old_shapes)  # plan delete orphans them
                 w.delete_plan(oid)
+                deleted_plans.add(oid)
+            # Re-assert the scale afterwards. Deleting the old plan takes its own
+            # `scale` shape with it, and the project's active scale goes with it —
+            # which is why "Set Scale" came back on re-imports even though the new
+            # plan had been scaled minutes earlier. Two idempotent calls.
+            if sc is not None:
+                w.set_unit(args.unit)
+                w.set_scale(sc)
 
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))
     if skipped:
@@ -927,6 +1007,10 @@ def main():
     p.add_argument("--no-verify-tls", dest="verify_tls", action="store_false")
     p.add_argument("--project-json", help="saved /project dump (offline dry-run catalog)")
     p.add_argument("--plan-title", help="override the new plan title")
+    p.add_argument("--site", default="default",
+                   help="UniFi Network site id used to look up adopted device "
+                        "names/MACs, so imported APs bind to real hardware "
+                        "(default: default)")
     p.add_argument("--unit", choices=["imperial", "metric"], default="imperial",
                    help="project display unit committed when setting scale "
                         "(default: imperial)")

@@ -281,12 +281,13 @@ Passives/decoupling are omitted from the summary below.
 
 ## 11. Rejected / alternative architectures
 
-- **PD + re‑source as PSE** (board negotiates PoE+ as a PD, then injects PoE to
-  the AP as a PSE). *Pro:* runs standalone, deterministic power budget, works
-  with a maxed class‑4 AP. *Con:* two negotiators, PSE controller + more
-  magnetics, and 25.5 W now shared between AP and board. Choose this if you need
-  the board up with nothing downstream, or must support high‑draw APs on long
-  runs from an at‑only upstream.
+- **PD + re‑source as PSE** — worked up in full as
+  [variant B](./poe-passthrough-ble-board-resource-variant.md). Board negotiates
+  PoE as a PD, then injects PoE to the AP as a PSE. *Pro:* runs standalone,
+  deterministic budget, feeds a maxed class‑4 AP. *Con:* re‑sourcing forces two
+  independent PoE domains, which forces **active 2.5 G data regeneration** (two
+  PHYs), and to hand a full PoE+ AP its power you must ingest **802.3bt**
+  upstream. See that doc's §10 for the A‑vs‑B decision.
 - **Power‑in‑only end node** (no downstream data). Not applicable — the AP needs
   its data link.
 - **BLE‑only / BLE Channel Sounding anchor** (no WiFi). Lower power and simpler,

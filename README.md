@@ -223,11 +223,16 @@ provided "as is", without warranty of any kind.
 
 ## Companion hardware
 
-[`docs/poe-passthrough-ble-board.md`](docs/poe-passthrough-ble-board.md)
-designs a small inline PoE+ pass‑through board with a WiFi‑FTM + BLE combo
-radio — a fixed anchor node whose surveyed coordinate is exactly the AP
-coordinate this tool already exports, so the positioning anchors and the WiFi
-plan share one source of truth.
+A small inline PoE+ pass‑through board with a WiFi‑FTM + BLE combo radio — a
+fixed anchor node whose surveyed coordinate is exactly the AP coordinate this
+tool already exports, so the positioning anchors and the WiFi plan share one
+source of truth. Two topologies:
+
+- [`docs/poe-passthrough-ble-board.md`](docs/poe-passthrough-ble-board.md) —
+  **variant A**, passive tap (one PoE domain, data straight through, lowest cost).
+- [`docs/poe-passthrough-ble-board-resource-variant.md`](docs/poe-passthrough-ble-board-resource-variant.md)
+  — **variant B**, PD + re‑source PSE (standalone, feeds a maxed AP, needs bt
+  upstream and active 2.5 G regeneration).
 
 ## License
 

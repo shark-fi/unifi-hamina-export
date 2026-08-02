@@ -221,6 +221,14 @@ credentials for that console and offers no way to reach one you cannot
 already log in to. As stated in the [license](LICENSE), the software is
 provided "as is", without warranty of any kind.
 
+## Companion hardware
+
+[`docs/poe-passthrough-ble-board.md`](docs/poe-passthrough-ble-board.md)
+designs a small inline PoE+ pass‑through board with a WiFi‑FTM + BLE combo
+radio — a fixed anchor node whose surveyed coordinate is exactly the AP
+coordinate this tool already exports, so the positioning anchors and the WiFi
+plan share one source of truth.
+
 ## License
 
 [MIT](LICENSE) © 2026 Mark Houtz

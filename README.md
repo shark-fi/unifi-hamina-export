@@ -234,6 +234,10 @@ source of truth. Two topologies:
   — **variant B**, PD + re‑source PSE (standalone, feeds a maxed AP, needs bt
   upstream and active 2.5 G regeneration).
 
+[`firmware/`](firmware/) holds the ESP‑IDF skeleton for the shared radio — an
+ESP32‑C5/C6 running as an 802.11mc FTM responder and BLE iBeacon, keyed to the
+same surveyed coordinate.
+
 ## License
 
 [MIT](LICENSE) © 2026 Mark Houtz

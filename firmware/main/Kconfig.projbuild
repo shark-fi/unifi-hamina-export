@@ -1,0 +1,66 @@
+menu "FTM/BLE Anchor configuration"
+
+    comment "Survey identity — mirror the AP coordinate exported into Hamina"
+
+    config ANCHOR_LABEL
+        string "Anchor label"
+        default "anchor-01"
+        help
+            Human-readable anchor name; also used as the SoftAP SSID suffix.
+
+    config ANCHOR_FLOOR
+        int "Floor / level index"
+        default 1
+
+    config ANCHOR_X_MM
+        int "Surveyed X coordinate (millimetres)"
+        default 0
+        help
+            Stored in mm so it fits an int; converted to metres at runtime.
+            This is the same X the exporter writes for the co-located AP.
+
+    config ANCHOR_Y_MM
+        int "Surveyed Y coordinate (millimetres)"
+        default 0
+
+    comment "Wi-Fi FTM responder (SoftAP)"
+
+    config ANCHOR_WIFI_SSID
+        string "SoftAP SSID base"
+        default "ftm-anchor"
+        help
+            Final SSID is "<SSID base>-<label>". Keep it stable per anchor —
+            initiators range against a known BSSID/SSID.
+
+    config ANCHOR_WIFI_PASSWORD
+        string "SoftAP WPA2 password (>= 8 chars, blank = open)"
+        default "ftmanchor"
+
+    config ANCHOR_WIFI_CHANNEL
+        int "SoftAP channel"
+        default 6
+        help
+            2.4 GHz: 1/6/11. On ESP32-C5 you may pick a 5 GHz channel for
+            wider bandwidth and better FTM range resolution.
+
+    comment "BLE iBeacon"
+
+    config ANCHOR_BLE_UUID
+        string "iBeacon proximity UUID (32 hex chars, no dashes)"
+        default "f7c0ffee00001111222233334444abcd"
+        help
+            One UUID per deployment. floor -> major, anchor id -> minor.
+
+    config ANCHOR_BLE_MAJOR
+        int "iBeacon major (site/floor)"
+        default 1
+
+    config ANCHOR_BLE_MINOR
+        int "iBeacon minor (anchor id)"
+        default 1
+
+    config ANCHOR_BLE_TXPOWER
+        int "iBeacon measured power (RSSI at 1 m, signed dBm)"
+        default -59
+
+endmenu

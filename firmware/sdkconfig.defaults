@@ -1,0 +1,33 @@
+# Baseline config for the FTM-responder + BLE-beacon anchor.
+# Target is selected with `idf.py set-target esp32c6` (or esp32c5); this file is
+# target-agnostic. Values here are the minimum needed for the two radio roles to
+# coexist on one chip — tune the rest in `idf.py menuconfig`.
+
+# --- Flash / partition table ---------------------------------------------------
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# --- Wi-Fi + FTM responder -----------------------------------------------------
+# FTM (802.11mc) support and the responder role must both be compiled in.
+CONFIG_ESP_WIFI_FTM_ENABLE=y
+CONFIG_ESP_WIFI_FTM_RESPONDER_SUPPORT=y
+CONFIG_ESP_WIFI_FTM_INITIATOR_SUPPORT=y
+CONFIG_ESP_WIFI_SOFTAP_SUPPORT=y
+
+# --- Bluetooth: NimBLE host ----------------------------------------------------
+# NimBLE is lighter than Bluedroid and all we need for a beacon.
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_NIMBLE_ROLE_BROADCASTER=y
+CONFIG_BT_NIMBLE_ROLE_OBSERVER=y
+CONFIG_BT_NIMBLE_ROLE_CENTRAL=n
+CONFIG_BT_NIMBLE_ROLE_PERIPHERAL=n
+
+# --- Wi-Fi / BLE software coexistence -----------------------------------------
+# Single radio shared between Wi-Fi (FTM) and BLE (beacon) — coex must be on.
+CONFIG_ESP_COEX_SW_COEXIST_ENABLE=y
+
+# --- Misc ----------------------------------------------------------------------
+CONFIG_LOG_DEFAULT_LEVEL_INFO=y
+CONFIG_ESP_TASK_WDT_EN=y

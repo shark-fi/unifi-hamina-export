@@ -9,6 +9,22 @@ Legend:  ✅ pass · ⚠️ works-but-degraded · ❌ blocker
 
 ---
 
+## Known results
+
+| Device | Kernel | Firmware | FTM caps advertised? | Verdict |
+|---|---|---|---|---|
+| **WLAN Pi Go** (Intel BE200) | `6.12.67-v8-wlanpi+` | `iwlwifi` -90 (`gl-c0-fm-c0-90.ucode`, newest published) | **No** — `iw phy` shows no FTM / peer-measurement / ranging, even after a clean reboot | ❌ cannot act as FTM initiator |
+
+The BE200's `-93/-92/-91` "Direct firmware load … failed (-2)" dmesg lines are
+**normal `iwlwifi` version-probing, not a fixable gap** — `-90` is the newest
+published blob, so there is nothing newer to load. Modern kernel + newest
+firmware + no advertised caps means the `iwlwifi`/BE200 stack simply does not
+expose FTM. This matches 2025 Intel-forum reports. Use an **AX210 / AX200**
+(or 8260) initiator on a host that accepts an M.2 Intel card instead; the tool
+and client here are radio-agnostic and carry over unchanged.
+
+---
+
 ## Phase 0 — Does the radio even expose FTM? (10 minutes, decides everything)
 
 - [ ] **Shell + root on the device.** You can `ssh` in (or open a console) and

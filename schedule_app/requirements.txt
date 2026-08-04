@@ -1,3 +1,0 @@
-Flask>=3.0
-twilio>=9.0
-gunicorn>=21.0

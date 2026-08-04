@@ -10,3 +10,7 @@ images/
 # Python
 __pycache__/
 *.pyc
+
+# Schedule app — local secrets and data
+schedule_app/.env
+schedule_app/*.db

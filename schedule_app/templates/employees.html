@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}Employees{% endblock %}
+
+{% block content %}
+<h1>Employees</h1>
+
+<section class="card">
+    <h2>Add employee</h2>
+    <form method="post" action="{{ url_for('add_employee') }}" class="form-grid">
+        <label>Name*
+            <input type="text" name="name" required>
+        </label>
+        <label>Role
+            <input type="text" name="role" placeholder="e.g. Barista">
+        </label>
+        <label>Email
+            <input type="email" name="email" placeholder="name@example.com">
+        </label>
+        <label>Phone
+            <input type="tel" name="phone" placeholder="+15551234567">
+        </label>
+        <div class="form-actions">
+            <button type="submit" class="btn btn-primary">Add employee</button>
+        </div>
+    </form>
+</section>
+
+<section class="card">
+    <h2>Current employees</h2>
+    {% if employees %}
+    <table class="grid">
+        <thead>
+            <tr><th>Name</th><th>Role</th><th>Email</th><th>Phone</th><th></th></tr>
+        </thead>
+        <tbody>
+            {% for e in employees %}
+            <tr>
+                <form method="post" action="{{ url_for('edit_employee', emp_id=e['id']) }}">
+                    <td><input type="text" name="name" value="{{ e['name'] }}" required></td>
+                    <td><input type="text" name="role" value="{{ e['role'] or '' }}"></td>
+                    <td><input type="email" name="email" value="{{ e['email'] or '' }}"></td>
+                    <td><input type="tel" name="phone" value="{{ e['phone'] or '' }}"></td>
+                    <td class="row-actions">
+                        <button type="submit" class="btn btn-small">Save</button>
+                </form>
+                        <form method="post" action="{{ url_for('delete_employee', emp_id=e['id']) }}"
+                              onsubmit="return confirm('Remove {{ e['name'] }} and all their shifts?')">
+                            <button type="submit" class="btn btn-small btn-danger">Delete</button>
+                        </form>
+                    </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <p class="muted">No employees yet. Add one above.</p>
+    {% endif %}
+</section>
+{% endblock %}

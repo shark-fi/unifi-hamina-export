@@ -1,0 +1,25 @@
+# Run the Employee Scheduler with a single command:
+#
+#     cp .env.example .env      # then fill in your SMTP / Twilio settings
+#     docker compose up --build
+#
+# Then open http://127.0.0.1:5000
+#
+# The schedule database is stored in the named volume `schedule-data`, so it
+# survives `docker compose down` and container rebuilds. Remove it with
+# `docker compose down -v` if you ever want a clean slate.
+
+services:
+  scheduler:
+    build: .
+    image: employee-scheduler
+    ports:
+      - "5000:5000"
+    env_file:
+      - .env
+    volumes:
+      - schedule-data:/data
+    restart: unless-stopped
+
+volumes:
+  schedule-data:

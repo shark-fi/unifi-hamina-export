@@ -1,0 +1,8 @@
+# Keep the build context small and never bake secrets or local data in.
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.db
+.env
+*.md

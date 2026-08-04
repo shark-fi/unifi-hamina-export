@@ -19,7 +19,21 @@ Employees  → add / edit / remove people (name, role, email, phone)
 Schedule   → add / remove shifts, and send an individual their schedule
 ```
 
-## Quick start
+## Quick start (Docker — recommended)
+
+```bash
+cp .env.example .env          # then fill in your SMTP / Twilio settings
+docker compose up --build
+```
+
+Open <http://127.0.0.1:5000>. The schedule database is stored in the named
+volume `schedule-data`, so it survives rebuilds and `docker compose down`.
+(Use `docker compose down -v` to wipe it.)
+
+The image runs the app behind **gunicorn** (a production WSGI server), not the
+Flask development server.
+
+## Quick start (local Python)
 
 ```bash
 cd schedule_app
@@ -88,13 +102,16 @@ glance whether sending will work.
 ## How it's organized
 
 ```
-schedule_app/
-├── app.py            # Flask routes (dashboard, employees, schedule, send)
-├── database.py       # SQLite layer: employees + shifts
-├── notifications.py  # Email (smtplib) + SMS (Twilio), message formatting
-├── templates/        # Jinja2 HTML (base, dashboard, employees, schedule)
-├── static/style.css  # Styling (light + dark)
+.
+├── app.py             # Flask routes (dashboard, employees, schedule, send)
+├── database.py        # SQLite layer: employees + shifts
+├── notifications.py   # Email (smtplib) + SMS (Twilio), message formatting
+├── templates/         # Jinja2 HTML (base, dashboard, employees, schedule)
+├── static/style.css   # Styling (light + dark)
 ├── requirements.txt
+├── Dockerfile         # gunicorn-based image
+├── docker-compose.yml # one-command run + persistent volume
+├── .dockerignore
 └── .env.example
 ```
 

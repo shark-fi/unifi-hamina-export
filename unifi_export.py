@@ -116,6 +116,24 @@ def blank_row():
     return {c: "" for c in CSV_COLUMNS}
 
 
+def fill_radio_columns(row, dev):
+    """Per-radio live state (channel / width / tx power / clients / state).
+
+    Always sourced from the device's radio_table_stats, never from the radios
+    we exported: a radio dropped for being down is exactly the one worth
+    seeing here, and rstate_* is what tells you it is down."""
+    for stat in dev.get("radio_table_stats") or []:
+        band = RADIO_BAND.get(stat.get("radio"))
+        if not band:
+            continue
+        row[f"ch_{band}"] = stat.get("channel", "")
+        row[f"bw_{band}"] = stat.get("bw", "")
+        row[f"txpw_{band}"] = stat.get("tx_power", "")
+        row[f"sta_{band}"] = stat.get("num_sta", "")
+        # RUN = on air; INIT/other = configured but not serving
+        row[f"rstate_{band}"] = stat.get("state", "")
+
+
 # --------------------------------------------------------------------------
 # cloud: Site Manager API (api.ui.com)
 # --------------------------------------------------------------------------
@@ -312,17 +330,7 @@ def run_legacy(args):
                     row["x_m"] = round(float(x) * float(upp), 2)
                     row["y_m"] = round(float(y) * float(upp), 2)
 
-            # per-radio live state (channel / tx power / clients)
-            for stat in dev.get("radio_table_stats") or []:
-                band = RADIO_BAND.get(stat.get("radio"))
-                if not band:
-                    continue
-                row[f"ch_{band}"] = stat.get("channel", "")
-                row[f"bw_{band}"] = stat.get("bw", "")
-                row[f"txpw_{band}"] = stat.get("tx_power", "")
-                row[f"sta_{band}"] = stat.get("num_sta", "")
-                # RUN = on air; INIT/other = configured but not serving
-                row[f"rstate_{band}"] = stat.get("state", "")
+            fill_radio_columns(row, dev)
             rows.append(row)
 
         if args.download_maps:
@@ -639,11 +647,7 @@ def run_innerspace(args):
                        map_upp=round(mpp, 6) if mpp else "",
                        x_m=round(x_px * mpp, 2) if mpp else "",
                        y_m=round(y_px * mpp, 2) if mpp else "")
-            for r in ap["dot11_radios"]:
-                b = {"FREQ_2.4GHZ": "2g", "FREQ_5GHZ": "5g",
-                     "FREQ_6GHZ": "6g"}[r["band"]]
-                row[f"ch_{b}"] = r.get("channel", "")
-                row[f"txpw_{b}"] = r.get("transmit_power", "")
+            fill_radio_columns(row, dev)
             rows.append(row)
 
         print(f"plan '{title}': {n_out} AP(s), {len(segs)} wall(s), "

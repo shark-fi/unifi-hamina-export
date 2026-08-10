@@ -38,6 +38,7 @@ Stdlib only. Self-signed controller certs are accepted for local/legacy.
 
 import argparse
 import csv
+import datetime
 import getpass
 import os
 import http.cookiejar
@@ -49,14 +50,15 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 CSV_COLUMNS = [
     "source", "site", "name", "model", "mac", "ip", "state", "type",
     "map_name", "x_px", "y_px", "map_upp", "x_m", "y_m",
-    "ch_2g", "txpw_2g", "sta_2g",
-    "ch_5g", "txpw_5g", "sta_5g",
-    "ch_6g", "txpw_6g", "sta_6g",
+    "ch_2g", "bw_2g", "txpw_2g", "sta_2g", "rstate_2g",
+    "ch_5g", "bw_5g", "txpw_5g", "sta_5g", "rstate_5g",
+    "ch_6g", "bw_6g", "txpw_6g", "sta_6g", "rstate_6g",
 ]
 
 
@@ -112,6 +114,24 @@ class Http:
 
 def blank_row():
     return {c: "" for c in CSV_COLUMNS}
+
+
+def fill_radio_columns(row, dev):
+    """Per-radio live state (channel / width / tx power / clients / state).
+
+    Always sourced from the device's radio_table_stats, never from the radios
+    we exported: a radio dropped for being down is exactly the one worth
+    seeing here, and rstate_* is what tells you it is down."""
+    for stat in dev.get("radio_table_stats") or []:
+        band = RADIO_BAND.get(stat.get("radio"))
+        if not band:
+            continue
+        row[f"ch_{band}"] = stat.get("channel", "")
+        row[f"bw_{band}"] = stat.get("bw", "")
+        row[f"txpw_{band}"] = stat.get("tx_power", "")
+        row[f"sta_{band}"] = stat.get("num_sta", "")
+        # RUN = on air; INIT/other = configured but not serving
+        row[f"rstate_{band}"] = stat.get("state", "")
 
 
 # --------------------------------------------------------------------------
@@ -243,9 +263,19 @@ def legacy_login(http_, base, username, password):
         if "HTTP 401" in str(e) or "HTTP 403" in str(e):
             die("login rejected (bad username/password?). Use a local admin "
                 "account, not a ui.com cloud account with MFA.")
-    # Classic software controller / CloudKey Gen1
-    http_.request("POST", f"{base}/api/login",
-                  body={"username": username, "password": password})
+        first = str(e)
+    # Classic software controller / CloudKey Gen1. If this fails too, report BOTH
+    # attempts: reporting only this one is actively misleading, since a UniFi OS
+    # console fails here for the mundane reason that it has no /api/login at all.
+    try:
+        http_.request("POST", f"{base}/api/login",
+                      body={"username": username, "password": password})
+    except RuntimeError as e:
+        die("could not log in to %s.\n  UniFi OS  (/api/auth/login): %s\n"
+            "  classic   (/api/login):      %s\n"
+            "  -> check the host really is the UniFi console (GET /api/system "
+            "identifies one), and use a local admin account."
+            % (base, first, e))
     return ""
 
 
@@ -300,14 +330,7 @@ def run_legacy(args):
                     row["x_m"] = round(float(x) * float(upp), 2)
                     row["y_m"] = round(float(y) * float(upp), 2)
 
-            # per-radio live state (channel / tx power / clients)
-            for stat in dev.get("radio_table_stats") or []:
-                band = RADIO_BAND.get(stat.get("radio"))
-                if not band:
-                    continue
-                row[f"ch_{band}"] = stat.get("channel", "")
-                row[f"txpw_{band}"] = stat.get("tx_power", "")
-                row[f"sta_{band}"] = stat.get("num_sta", "")
+            fill_radio_columns(row, dev)
             rows.append(row)
 
         if args.download_maps:
@@ -601,7 +624,8 @@ def run_innerspace(args):
             # radio state comes from the Network app when joined; otherwise
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
-                        "model": dev.get("model") or sku}, fp["name"], coords)
+                        "model": dev.get("model") or sku}, fp["name"], coords,
+                       getattr(args, "include_down_radios", False))
             model = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
             ap["model"] = model
             ap["model_original"] = sku
@@ -623,11 +647,7 @@ def run_innerspace(args):
                        map_upp=round(mpp, 6) if mpp else "",
                        x_m=round(x_px * mpp, 2) if mpp else "",
                        y_m=round(y_px * mpp, 2) if mpp else "")
-            for r in ap["dot11_radios"]:
-                b = {"FREQ_2.4GHZ": "2g", "FREQ_5GHZ": "5g",
-                     "FREQ_6GHZ": "6g"}[r["band"]]
-                row[f"ch_{b}"] = r.get("channel", "")
-                row[f"txpw_{b}"] = r.get("transmit_power", "")
+            fill_radio_columns(row, dev)
             rows.append(row)
 
         print(f"plan '{title}': {n_out} AP(s), {len(segs)} wall(s), "
@@ -870,6 +890,155 @@ def run_probe(args):
 
 
 # --------------------------------------------------------------------------
+# confirm-write: prove InnerSpace accepts scripted position writes
+# --------------------------------------------------------------------------
+#
+# Answers the two Phase-4 unknowns in docs/INNERSPACE_WRITE_API.md:
+#   (1) can a scripted caller post /shape/change with a random socketId and
+#       have the write persist, or is a live websocket session id required?
+#   (2) writes return an empty body -> verify by re-GET /project?mode=2D.
+#
+# Method: create a clearly-labelled scratch AP on an existing plan at (0,0),
+# re-GET to confirm it persisted, MOVE it to (3,4), re-GET to confirm the new
+# position persisted (this is the actual position write), then DELETE it.
+# Net change to the project when it completes: none. Dry-run by default.
+
+def _iso_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def run_confirm_write(args):
+    http_ = Http(verify=args.verify_tls)
+    base = args.host.rstrip("/")
+    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    legacy_login(http_, base, args.username, password)
+    api = f"{base}{INNERSPACE_API}"
+
+    data = innerspace_project(http_, base)
+    project_id = (data.get("project") or {}).get("id")
+    plans = data.get("plans") or []
+    products = data.get("products") or []
+    if not project_id:
+        die("no project id in the InnerSpace payload")
+    if not plans:
+        die("InnerSpace has no floor plans — create one in the UI first; this "
+            "probe needs an existing plan to place a scratch device on")
+
+    if args.plan:
+        plan = next((p for p in plans
+                     if args.plan.lower() in (p.get("title") or "").lower()), None)
+        if not plan:
+            die(f"no plan whose title contains '{args.plan}'")
+    else:
+        plan = plans[0]
+    plan_id = plan["id"]
+
+    wifi = [p for p in products if p.get("category") == "wifi"]
+    product_id = (wifi or products or [{}])[0].get("id")
+    if not product_id:
+        die("no catalog product to reference for a device shape "
+            "(products[] is empty)")
+
+    socket_id = str(uuid.uuid4())
+    dev_id = str(uuid.uuid4())
+    p_start = {"x": 0.0, "y": 0.0, "z": 0}
+    p_moved = {"x": 3.0, "y": 4.0, "z": 0}
+    quat = {"w": 1, "x": 0, "y": 0, "z": 0}
+
+    def device_shape(pos):
+        now = _iso_now()
+        return {
+            "id": dev_id, "planId": plan_id, "projectId": project_id,
+            "type": "device", "title": "SURFSCAN-WRITE-PROBE (safe to delete)",
+            "productId": product_id, "meta": {"mac": "025355524650"},
+            "mount": "ceiling", "position": [pos],
+            "rotation": {"base": dict(quat), "pov": dict(quat)},
+            "antenna": None, "parentId": None, "childIndex": None,
+            "rackId": None, "rackOrder": None, "optimize": False,
+            "status": 1, "createdAt": now, "updatedAt": now,
+        }
+
+    def shape_change(create=None, update=None, remove=None):
+        body = {"mode": "2D", "create": create or [],
+                "update": update or [], "remove": remove or []}
+        return http_.request(
+            "POST", f"{api}/shape/change?socketId={socket_id}", body=body)
+
+    def probe_position():
+        """Re-GET the project; return our device's position dict, or None."""
+        for s in innerspace_project(http_, base).get("shapes") or []:
+            if s.get("id") == dev_id:
+                pts = s.get("position") or []
+                return pts[0] if pts else None
+        return None
+
+    def at(pos, want):
+        return (pos is not None
+                and abs(float(pos["x"]) - want["x"]) < 0.01
+                and abs(float(pos["y"]) - want["y"]) < 0.01)
+
+    print(f"project        {project_id}")
+    print(f"plan           {plan_id}  ('{plan.get('title')}')")
+    print(f"product        {product_id}")
+    print(f"scratch device {dev_id}")
+    print(f"socketId       {socket_id}  (random UUID — the test is whether this")
+    print( "               is accepted without a live websocket session)\n")
+
+    if not args.live:
+        print("DRY RUN — nothing is sent. Re-run with --live to execute.\n")
+        print("--live would perform, on the plan above:")
+        print("  1. POST /shape/change create=[AP @ (0,0)]  -> re-GET expects it present")
+        print("  2. POST /shape/change update=[AP @ (3,4)]  -> re-GET expects it MOVED")
+        print("  3. POST /shape/change remove=[AP]          -> re-GET expects it gone")
+        print("\nNet change if run live: none (the scratch AP is created, moved, "
+              "then deleted).")
+        return []
+
+    ok, created = True, False
+    try:
+        shape_change(create=[device_shape(p_start)])
+        created = True
+        if at(probe_position(), p_start):
+            print("[PASS] create persisted — scratch AP present at (0,0)")
+        else:
+            ok = False
+            print("[FAIL] create did NOT persist after re-GET.\n"
+                  "       -> a random socketId is rejected; scripted writes "
+                  "likely need a live websocket session id (see doc open item 1).")
+            return []
+
+        shape_change(update=[device_shape(p_moved)])
+        if at(probe_position(), p_moved):
+            print("[PASS] POSITION WRITE persisted — scratch AP moved to (3,4)")
+        else:
+            ok = False
+            print("[FAIL] position update did NOT persist after re-GET.")
+    finally:
+        if created:
+            try:
+                shape_change(remove=[device_shape(p_moved)])
+                if probe_position() is None:
+                    print("[PASS] cleanup — scratch AP removed")
+                else:
+                    print(f"[WARN] scratch AP {dev_id} may remain — delete "
+                          "'SURFSCAN-WRITE-PROBE' from the InnerSpace UI")
+            except RuntimeError as e:
+                print(f"[WARN] cleanup failed ({e}) — delete "
+                      "'SURFSCAN-WRITE-PROBE' from the InnerSpace UI",
+                      file=sys.stderr)
+
+    print()
+    if ok:
+        print("CONFIRMED — InnerSpace accepts scripted position writes via "
+              "POST /shape/change with a random socketId; verify each write by "
+              "re-GETting /project?mode=2D.")
+    else:
+        print("NOT CONFIRMED — see the [FAIL] line(s) above.")
+    return []
+
+
+# --------------------------------------------------------------------------
 # OpenIntent 2.0 export (zip importable by Hamina Network Planner)
 # --------------------------------------------------------------------------
 
@@ -919,30 +1088,83 @@ def safe_name(s):
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in s)
 
 
-def oi_radios(dev):
-    """Merge radio_table (config: ht width) + radio_table_stats (live)."""
+def oi_width(v):
+    """OpenIntent width label from a UniFi width, which may be an int or a
+    string ('80'); None if it is not a width we can express."""
+    try:
+        return OI_WIDTH[int(v)]
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def oi_radios(dev, include_down=False):
+    """Radios from live state (radio_table_stats), falling back to the
+    configured radio_table only where live state is missing.
+
+    Live has to win. RRM moves radios at runtime, so radio_table is a
+    statement of intent, not of fact: a radio configured ht 80 routinely
+    operates at 40, `channel: "auto"` resolves to a number only in the live
+    stats, and radio_table's tx_power is the configured floor (it equals
+    min_txpower) while the stats carry the power actually in use. Exporting
+    the configured values makes Hamina predict a network that is not on air.
+
+    A radio whose live state is not RUN is not serving clients at all -- a
+    disabled or wedged 2.4 GHz radio is common -- so it is dropped unless
+    include_down, rather than seeding the plan with coverage that does not
+    exist. Warnings name every radio dropped."""
     stats = {s.get("radio"): s for s in dev.get("radio_table_stats") or []}
     table = dev.get("radio_table") or [{"radio": r} for r in stats]
+    who = dev.get("name") or dev.get("mac") or "AP"
     radios = []
-    for i, rt in enumerate(table):
-        band = OI_BAND.get(rt.get("radio"))
+    for rt in table:
+        key = rt.get("radio")
+        band = OI_BAND.get(key)
         if not band:
             continue
-        r = {"id": i, "radio_function": "CLIENT_ACCESS", "band": band}
-        st = stats.get(rt.get("radio")) or {}
-        ch = st.get("channel", rt.get("channel"))
+        st = stats.get(key) or {}
+
+        state = st.get("state")
+        if state and state != "RUN" and not include_down:
+            print(f"warning: {who}: {band} radio ({key}) is in state "
+                  f"{state}, not RUN — omitted from the export "
+                  f"(--include-down-radios keeps it)")
+            continue
+
+        r = {"id": len(radios), "radio_function": "CLIENT_ACCESS",
+             "band": band}
+
+        ch = st.get("channel")
+        if not isinstance(ch, int):
+            ch = rt.get("channel")          # "auto" until RRM resolves it
         if isinstance(ch, int):
             r["channel"] = ch
-        try:
-            ht = int(rt.get("ht"))
-        except (TypeError, ValueError):
-            ht = None
-        if ht in OI_WIDTH:
-            r["channel_width"] = OI_WIDTH[ht]
+
+        width = oi_width(st.get("bw")) or oi_width(rt.get("ht"))
+        if width:
+            r["channel_width"] = width
+
+        # live only: radio_table's tx_power is the floor, not the operating
+        # power, so a fallback there would silently understate every radio
         tp = st.get("tx_power")
         if isinstance(tp, (int, float)):
             r["transmit_power"] = tp
+
+        nss = rt.get("nss")
+        if isinstance(nss, int) and nss > 0:
+            r["mimo_chains"] = nss
+
+        # Only claim AUTOMATIC when the controller still says "auto". Once
+        # RRM picks a channel it writes the number back into radio_table, so
+        # an int here does not distinguish a hand-pinned radio from an
+        # auto one that has already settled -- and asserting MANUAL on a
+        # guess would stop Hamina re-optimising it. Omit when unsure.
+        if rt.get("channel") == "auto":
+            r["channel_assignment"] = "AUTOMATIC"
         radios.append(r)
+
+    if table and not stats:
+        print(f"warning: {who}: no live radio state (device offline?) — "
+              f"exporting configured channels and widths, no tx power")
     return radios
 
 
@@ -958,10 +1180,10 @@ def default_radios(model):
             for i, b in enumerate(bands)]
 
 
-def oi_ap(dev, fp_name, coords):
+def oi_ap(dev, fp_name, coords, include_down=False):
     code = dev.get("model") or ""
     model = UNIFI_MODEL_NAMES.get(code, code.lower())
-    radios = oi_radios(dev) or default_radios(code)
+    radios = oi_radios(dev, include_down) or default_radios(code)
     bands = [{"band": r["band"]} for r in radios]
     ap = {
         "name": dev.get("name") or dev.get("mac") or "AP",
@@ -1011,7 +1233,8 @@ def build_openintent_unplaced(site_data, args):
                                     "z": z_m * px_per_m, "unit": "pixels"}},
                 {"coordinate_xyz": {"x": x_m, "y": y_m, "z": z_m,
                                     "unit": "meters"}}]
-            aps_out.append(oi_ap(dev, fp_name, coords))
+            aps_out.append(oi_ap(dev, fp_name, coords,
+                                 getattr(args, "include_down_radios", False)))
 
     if not aps_out:
         print("openintent: no APs found to export", file=sys.stderr)
@@ -1104,7 +1327,9 @@ def build_openintent(http_, base, prefix, site_data, args):
                     coords.append({"coordinate_xyz": {
                         "x": x * upp, "y": y * upp, "z": z_m,
                         "unit": "meters"}})
-                aps_out.append(oi_ap(dev, fp_name, coords))
+                aps_out.append(oi_ap(dev, fp_name, coords,
+                                     getattr(args, "include_down_radios",
+                                             False)))
 
     if not aps_out:
         print("openintent: no placed APs found — nothing to export "
@@ -1186,6 +1411,10 @@ def main():
     g.add_argument("--unplaced", action="store_true",
                    help="if the console has no floor plans, still export APs "
                         "+ radio config onto a placeholder plan")
+    g.add_argument("--include-down-radios", action="store_true",
+                   help="keep radios whose live state is not RUN (default: "
+                        "drop them, so the plan does not predict coverage "
+                        "from a disabled or wedged radio)")
 
     i = sub.add_parser("innerspace", parents=[common],
                        help="floor plans + AP placements + walls from the "
@@ -1206,6 +1435,10 @@ def main():
                    help="omit wall segments from the OpenIntent export")
     i.add_argument("--no-radio", action="store_true",
                    help="skip the Network-app join for channel/tx power")
+    i.add_argument("--include-down-radios", action="store_true",
+                   help="keep radios whose live state is not RUN (default: "
+                        "drop them, so the plan does not predict coverage "
+                        "from a disabled or wedged radio)")
     i.add_argument("--project-json", metavar="FILE",
                    help="use a saved project.json instead of fetching")
 
@@ -1236,14 +1469,30 @@ def main():
                    action="store_false", default=True,
                    help="include switches/gateways, not just APs")
 
+    cw = sub.add_parser("confirm-write", parents=[common],
+                        help="prove InnerSpace accepts scripted AP position "
+                             "writes (creates+moves+deletes a scratch AP; "
+                             "dry-run unless --live)")
+    cw.add_argument("--host", required=True, help="console URL")
+    cw.add_argument("-u", "--username", required=True, help="local admin user")
+    cw.add_argument("-p", "--password", help="password (prompted if omitted)")
+    cw.add_argument("--verify-tls", action="store_true", default=False,
+                    help="verify the console TLS cert (default: skip)")
+    cw.add_argument("--plan", metavar="NAME",
+                    help="place the scratch AP on the plan whose title contains "
+                         "NAME (default: the first plan)")
+    cw.add_argument("--live", action="store_true",
+                    help="actually send the writes (default: dry run, no POSTs)")
+
     args = p.parse_args()
 
     try:
         rows = {"cloud": run_cloud, "local": run_local, "legacy": run_legacy,
-                "innerspace": run_innerspace, "probe": run_probe}[args.mode](args)
+                "innerspace": run_innerspace, "probe": run_probe,
+                "confirm-write": run_confirm_write}[args.mode](args)
     except RuntimeError as e:
         die(str(e))
-    if args.mode == "probe":
+    if args.mode in ("probe", "confirm-write"):
         return
     write_csv(rows, args.output)
     placed = sum(1 for r in rows if r["x_px"] != "")

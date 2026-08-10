@@ -38,6 +38,7 @@ Stdlib only. Self-signed controller certs are accepted for local/legacy.
 
 import argparse
 import csv
+import datetime
 import getpass
 import os
 import http.cookiejar
@@ -49,6 +50,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 import zipfile
 
 CSV_COLUMNS = [
@@ -880,6 +882,155 @@ def run_probe(args):
 
 
 # --------------------------------------------------------------------------
+# confirm-write: prove InnerSpace accepts scripted position writes
+# --------------------------------------------------------------------------
+#
+# Answers the two Phase-4 unknowns in docs/INNERSPACE_WRITE_API.md:
+#   (1) can a scripted caller post /shape/change with a random socketId and
+#       have the write persist, or is a live websocket session id required?
+#   (2) writes return an empty body -> verify by re-GET /project?mode=2D.
+#
+# Method: create a clearly-labelled scratch AP on an existing plan at (0,0),
+# re-GET to confirm it persisted, MOVE it to (3,4), re-GET to confirm the new
+# position persisted (this is the actual position write), then DELETE it.
+# Net change to the project when it completes: none. Dry-run by default.
+
+def _iso_now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def run_confirm_write(args):
+    http_ = Http(verify=args.verify_tls)
+    base = args.host.rstrip("/")
+    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    legacy_login(http_, base, args.username, password)
+    api = f"{base}{INNERSPACE_API}"
+
+    data = innerspace_project(http_, base)
+    project_id = (data.get("project") or {}).get("id")
+    plans = data.get("plans") or []
+    products = data.get("products") or []
+    if not project_id:
+        die("no project id in the InnerSpace payload")
+    if not plans:
+        die("InnerSpace has no floor plans — create one in the UI first; this "
+            "probe needs an existing plan to place a scratch device on")
+
+    if args.plan:
+        plan = next((p for p in plans
+                     if args.plan.lower() in (p.get("title") or "").lower()), None)
+        if not plan:
+            die(f"no plan whose title contains '{args.plan}'")
+    else:
+        plan = plans[0]
+    plan_id = plan["id"]
+
+    wifi = [p for p in products if p.get("category") == "wifi"]
+    product_id = (wifi or products or [{}])[0].get("id")
+    if not product_id:
+        die("no catalog product to reference for a device shape "
+            "(products[] is empty)")
+
+    socket_id = str(uuid.uuid4())
+    dev_id = str(uuid.uuid4())
+    p_start = {"x": 0.0, "y": 0.0, "z": 0}
+    p_moved = {"x": 3.0, "y": 4.0, "z": 0}
+    quat = {"w": 1, "x": 0, "y": 0, "z": 0}
+
+    def device_shape(pos):
+        now = _iso_now()
+        return {
+            "id": dev_id, "planId": plan_id, "projectId": project_id,
+            "type": "device", "title": "SURFSCAN-WRITE-PROBE (safe to delete)",
+            "productId": product_id, "meta": {"mac": "025355524650"},
+            "mount": "ceiling", "position": [pos],
+            "rotation": {"base": dict(quat), "pov": dict(quat)},
+            "antenna": None, "parentId": None, "childIndex": None,
+            "rackId": None, "rackOrder": None, "optimize": False,
+            "status": 1, "createdAt": now, "updatedAt": now,
+        }
+
+    def shape_change(create=None, update=None, remove=None):
+        body = {"mode": "2D", "create": create or [],
+                "update": update or [], "remove": remove or []}
+        return http_.request(
+            "POST", f"{api}/shape/change?socketId={socket_id}", body=body)
+
+    def probe_position():
+        """Re-GET the project; return our device's position dict, or None."""
+        for s in innerspace_project(http_, base).get("shapes") or []:
+            if s.get("id") == dev_id:
+                pts = s.get("position") or []
+                return pts[0] if pts else None
+        return None
+
+    def at(pos, want):
+        return (pos is not None
+                and abs(float(pos["x"]) - want["x"]) < 0.01
+                and abs(float(pos["y"]) - want["y"]) < 0.01)
+
+    print(f"project        {project_id}")
+    print(f"plan           {plan_id}  ('{plan.get('title')}')")
+    print(f"product        {product_id}")
+    print(f"scratch device {dev_id}")
+    print(f"socketId       {socket_id}  (random UUID — the test is whether this")
+    print( "               is accepted without a live websocket session)\n")
+
+    if not args.live:
+        print("DRY RUN — nothing is sent. Re-run with --live to execute.\n")
+        print("--live would perform, on the plan above:")
+        print("  1. POST /shape/change create=[AP @ (0,0)]  -> re-GET expects it present")
+        print("  2. POST /shape/change update=[AP @ (3,4)]  -> re-GET expects it MOVED")
+        print("  3. POST /shape/change remove=[AP]          -> re-GET expects it gone")
+        print("\nNet change if run live: none (the scratch AP is created, moved, "
+              "then deleted).")
+        return []
+
+    ok, created = True, False
+    try:
+        shape_change(create=[device_shape(p_start)])
+        created = True
+        if at(probe_position(), p_start):
+            print("[PASS] create persisted — scratch AP present at (0,0)")
+        else:
+            ok = False
+            print("[FAIL] create did NOT persist after re-GET.\n"
+                  "       -> a random socketId is rejected; scripted writes "
+                  "likely need a live websocket session id (see doc open item 1).")
+            return []
+
+        shape_change(update=[device_shape(p_moved)])
+        if at(probe_position(), p_moved):
+            print("[PASS] POSITION WRITE persisted — scratch AP moved to (3,4)")
+        else:
+            ok = False
+            print("[FAIL] position update did NOT persist after re-GET.")
+    finally:
+        if created:
+            try:
+                shape_change(remove=[device_shape(p_moved)])
+                if probe_position() is None:
+                    print("[PASS] cleanup — scratch AP removed")
+                else:
+                    print(f"[WARN] scratch AP {dev_id} may remain — delete "
+                          "'SURFSCAN-WRITE-PROBE' from the InnerSpace UI")
+            except RuntimeError as e:
+                print(f"[WARN] cleanup failed ({e}) — delete "
+                      "'SURFSCAN-WRITE-PROBE' from the InnerSpace UI",
+                      file=sys.stderr)
+
+    print()
+    if ok:
+        print("CONFIRMED — InnerSpace accepts scripted position writes via "
+              "POST /shape/change with a random socketId; verify each write by "
+              "re-GETting /project?mode=2D.")
+    else:
+        print("NOT CONFIRMED — see the [FAIL] line(s) above.")
+    return []
+
+
+# --------------------------------------------------------------------------
 # OpenIntent 2.0 export (zip importable by Hamina Network Planner)
 # --------------------------------------------------------------------------
 
@@ -1246,14 +1397,30 @@ def main():
                    action="store_false", default=True,
                    help="include switches/gateways, not just APs")
 
+    cw = sub.add_parser("confirm-write", parents=[common],
+                        help="prove InnerSpace accepts scripted AP position "
+                             "writes (creates+moves+deletes a scratch AP; "
+                             "dry-run unless --live)")
+    cw.add_argument("--host", required=True, help="console URL")
+    cw.add_argument("-u", "--username", required=True, help="local admin user")
+    cw.add_argument("-p", "--password", help="password (prompted if omitted)")
+    cw.add_argument("--verify-tls", action="store_true", default=False,
+                    help="verify the console TLS cert (default: skip)")
+    cw.add_argument("--plan", metavar="NAME",
+                    help="place the scratch AP on the plan whose title contains "
+                         "NAME (default: the first plan)")
+    cw.add_argument("--live", action="store_true",
+                    help="actually send the writes (default: dry run, no POSTs)")
+
     args = p.parse_args()
 
     try:
         rows = {"cloud": run_cloud, "local": run_local, "legacy": run_legacy,
-                "innerspace": run_innerspace, "probe": run_probe}[args.mode](args)
+                "innerspace": run_innerspace, "probe": run_probe,
+                "confirm-write": run_confirm_write}[args.mode](args)
     except RuntimeError as e:
         die(str(e))
-    if args.mode == "probe":
+    if args.mode in ("probe", "confirm-write"):
         return
     write_csv(rows, args.output)
     placed = sum(1 for r in rows if r["x_px"] != "")

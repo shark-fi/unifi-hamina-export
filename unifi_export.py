@@ -56,9 +56,9 @@ import zipfile
 CSV_COLUMNS = [
     "source", "site", "name", "model", "mac", "ip", "state", "type",
     "map_name", "x_px", "y_px", "map_upp", "x_m", "y_m",
-    "ch_2g", "txpw_2g", "sta_2g",
-    "ch_5g", "txpw_5g", "sta_5g",
-    "ch_6g", "txpw_6g", "sta_6g",
+    "ch_2g", "bw_2g", "txpw_2g", "sta_2g", "rstate_2g",
+    "ch_5g", "bw_5g", "txpw_5g", "sta_5g", "rstate_5g",
+    "ch_6g", "bw_6g", "txpw_6g", "sta_6g", "rstate_6g",
 ]
 
 
@@ -318,8 +318,11 @@ def run_legacy(args):
                 if not band:
                     continue
                 row[f"ch_{band}"] = stat.get("channel", "")
+                row[f"bw_{band}"] = stat.get("bw", "")
                 row[f"txpw_{band}"] = stat.get("tx_power", "")
                 row[f"sta_{band}"] = stat.get("num_sta", "")
+                # RUN = on air; INIT/other = configured but not serving
+                row[f"rstate_{band}"] = stat.get("state", "")
             rows.append(row)
 
         if args.download_maps:
@@ -613,7 +616,8 @@ def run_innerspace(args):
             # radio state comes from the Network app when joined; otherwise
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
-                        "model": dev.get("model") or sku}, fp["name"], coords)
+                        "model": dev.get("model") or sku}, fp["name"], coords,
+                       getattr(args, "include_down_radios", False))
             model = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
             ap["model"] = model
             ap["model_original"] = sku
@@ -1080,30 +1084,83 @@ def safe_name(s):
     return "".join(c if c.isalnum() or c in "-_." else "_" for c in s)
 
 
-def oi_radios(dev):
-    """Merge radio_table (config: ht width) + radio_table_stats (live)."""
+def oi_width(v):
+    """OpenIntent width label from a UniFi width, which may be an int or a
+    string ('80'); None if it is not a width we can express."""
+    try:
+        return OI_WIDTH[int(v)]
+    except (TypeError, ValueError, KeyError):
+        return None
+
+
+def oi_radios(dev, include_down=False):
+    """Radios from live state (radio_table_stats), falling back to the
+    configured radio_table only where live state is missing.
+
+    Live has to win. RRM moves radios at runtime, so radio_table is a
+    statement of intent, not of fact: a radio configured ht 80 routinely
+    operates at 40, `channel: "auto"` resolves to a number only in the live
+    stats, and radio_table's tx_power is the configured floor (it equals
+    min_txpower) while the stats carry the power actually in use. Exporting
+    the configured values makes Hamina predict a network that is not on air.
+
+    A radio whose live state is not RUN is not serving clients at all -- a
+    disabled or wedged 2.4 GHz radio is common -- so it is dropped unless
+    include_down, rather than seeding the plan with coverage that does not
+    exist. Warnings name every radio dropped."""
     stats = {s.get("radio"): s for s in dev.get("radio_table_stats") or []}
     table = dev.get("radio_table") or [{"radio": r} for r in stats]
+    who = dev.get("name") or dev.get("mac") or "AP"
     radios = []
-    for i, rt in enumerate(table):
-        band = OI_BAND.get(rt.get("radio"))
+    for rt in table:
+        key = rt.get("radio")
+        band = OI_BAND.get(key)
         if not band:
             continue
-        r = {"id": i, "radio_function": "CLIENT_ACCESS", "band": band}
-        st = stats.get(rt.get("radio")) or {}
-        ch = st.get("channel", rt.get("channel"))
+        st = stats.get(key) or {}
+
+        state = st.get("state")
+        if state and state != "RUN" and not include_down:
+            print(f"warning: {who}: {band} radio ({key}) is in state "
+                  f"{state}, not RUN — omitted from the export "
+                  f"(--include-down-radios keeps it)")
+            continue
+
+        r = {"id": len(radios), "radio_function": "CLIENT_ACCESS",
+             "band": band}
+
+        ch = st.get("channel")
+        if not isinstance(ch, int):
+            ch = rt.get("channel")          # "auto" until RRM resolves it
         if isinstance(ch, int):
             r["channel"] = ch
-        try:
-            ht = int(rt.get("ht"))
-        except (TypeError, ValueError):
-            ht = None
-        if ht in OI_WIDTH:
-            r["channel_width"] = OI_WIDTH[ht]
+
+        width = oi_width(st.get("bw")) or oi_width(rt.get("ht"))
+        if width:
+            r["channel_width"] = width
+
+        # live only: radio_table's tx_power is the floor, not the operating
+        # power, so a fallback there would silently understate every radio
         tp = st.get("tx_power")
         if isinstance(tp, (int, float)):
             r["transmit_power"] = tp
+
+        nss = rt.get("nss")
+        if isinstance(nss, int) and nss > 0:
+            r["mimo_chains"] = nss
+
+        # Only claim AUTOMATIC when the controller still says "auto". Once
+        # RRM picks a channel it writes the number back into radio_table, so
+        # an int here does not distinguish a hand-pinned radio from an
+        # auto one that has already settled -- and asserting MANUAL on a
+        # guess would stop Hamina re-optimising it. Omit when unsure.
+        if rt.get("channel") == "auto":
+            r["channel_assignment"] = "AUTOMATIC"
         radios.append(r)
+
+    if table and not stats:
+        print(f"warning: {who}: no live radio state (device offline?) — "
+              f"exporting configured channels and widths, no tx power")
     return radios
 
 
@@ -1119,10 +1176,10 @@ def default_radios(model):
             for i, b in enumerate(bands)]
 
 
-def oi_ap(dev, fp_name, coords):
+def oi_ap(dev, fp_name, coords, include_down=False):
     code = dev.get("model") or ""
     model = UNIFI_MODEL_NAMES.get(code, code.lower())
-    radios = oi_radios(dev) or default_radios(code)
+    radios = oi_radios(dev, include_down) or default_radios(code)
     bands = [{"band": r["band"]} for r in radios]
     ap = {
         "name": dev.get("name") or dev.get("mac") or "AP",
@@ -1172,7 +1229,8 @@ def build_openintent_unplaced(site_data, args):
                                     "z": z_m * px_per_m, "unit": "pixels"}},
                 {"coordinate_xyz": {"x": x_m, "y": y_m, "z": z_m,
                                     "unit": "meters"}}]
-            aps_out.append(oi_ap(dev, fp_name, coords))
+            aps_out.append(oi_ap(dev, fp_name, coords,
+                                 getattr(args, "include_down_radios", False)))
 
     if not aps_out:
         print("openintent: no APs found to export", file=sys.stderr)
@@ -1265,7 +1323,9 @@ def build_openintent(http_, base, prefix, site_data, args):
                     coords.append({"coordinate_xyz": {
                         "x": x * upp, "y": y * upp, "z": z_m,
                         "unit": "meters"}})
-                aps_out.append(oi_ap(dev, fp_name, coords))
+                aps_out.append(oi_ap(dev, fp_name, coords,
+                                     getattr(args, "include_down_radios",
+                                             False)))
 
     if not aps_out:
         print("openintent: no placed APs found — nothing to export "
@@ -1347,6 +1407,10 @@ def main():
     g.add_argument("--unplaced", action="store_true",
                    help="if the console has no floor plans, still export APs "
                         "+ radio config onto a placeholder plan")
+    g.add_argument("--include-down-radios", action="store_true",
+                   help="keep radios whose live state is not RUN (default: "
+                        "drop them, so the plan does not predict coverage "
+                        "from a disabled or wedged radio)")
 
     i = sub.add_parser("innerspace", parents=[common],
                        help="floor plans + AP placements + walls from the "
@@ -1367,6 +1431,10 @@ def main():
                    help="omit wall segments from the OpenIntent export")
     i.add_argument("--no-radio", action="store_true",
                    help="skip the Network-app join for channel/tx power")
+    i.add_argument("--include-down-radios", action="store_true",
+                   help="keep radios whose live state is not RUN (default: "
+                        "drop them, so the plan does not predict coverage "
+                        "from a disabled or wedged radio)")
     i.add_argument("--project-json", metavar="FILE",
                    help="use a saved project.json instead of fetching")
 

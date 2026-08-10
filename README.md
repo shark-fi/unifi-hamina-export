@@ -33,14 +33,46 @@ access only"). A ui.com cloud account hits MFA and cannot log in from a script.
 | `cloud` | Site Manager API (`api.ui.com`) | AP inventory across cloud-connected consoles |
 | `probe` | — | Diagnostics: which floor-plan APIs a console exposes |
 
-`innerspace` also joins the Network app by MAC to fill in live channel and TX
-power per radio (`--no-radio` to skip). `--no-walls` omits wall segments;
+`innerspace` also joins the Network app by MAC to fill in live channel, width
+and TX power per radio (`--no-radio` to skip). `--no-walls` omits wall segments;
 `--plan NAME` limits export to matching floors.
 
 `legacy` mode works only on Network versions that still have classic Maps.
 Newer consoles return `api.err.InvalidObject` / `api.err.NotFound` — use
 `innerspace`. `--unplaced` exports APs with radio config onto a placeholder
 grid when no floor plans exist at all.
+
+### Radios: live state, not configured intent
+
+Radios come from the device's `radio_table_stats` (what is actually on air),
+not `radio_table` (what was configured). The two disagree in ways that matter
+to a prediction:
+
+| | `radio_table` (configured) | `radio_table_stats` (live) |
+|---|---|---|
+| Width | requested `ht` — 80 MHz | operating `bw` — routinely 40 MHz |
+| Channel | `"auto"` until RRM resolves it | the resolved number |
+| TX power | equals `min_txpower`, the floor | the power actually in use |
+
+On a real site every 5 GHz radio requested 80 MHz and ran at 40, and an
+AFC standard-power outdoor AP ran 26 dBm where the configured value said 6 —
+a 20 dB error in the direction that hides coverage holes.
+
+The configured table is still used for `mimo_chains` (`nss`), and as a fallback
+for channel and width when a device is offline and has no live state at all —
+never for TX power, since the configured value is the floor and would silently
+understate every radio.
+
+A radio whose live `state` is not `RUN` (a disabled or wedged radio, typically
+2.4 GHz) is **dropped**, with a warning naming it, so the plan doesn't predict
+coverage that isn't there. `--include-down-radios` keeps them; the flag is
+available on both `legacy` and `innerspace`.
+
+`channel_assignment: AUTOMATIC` is emitted only when the controller still says
+`"auto"`. Once RRM settles it writes the number back into `radio_table`, so an
+int there can't distinguish a hand-pinned radio from a settled auto one — the
+field is omitted rather than asserting `MANUAL` on a guess and stopping Hamina
+from re-optimising.
 
 ## How InnerSpace works
 
@@ -107,7 +139,10 @@ schema. Zip conventions follow
 OpenIntent converter tested against Hamina's importer.
 
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
-coordinates, and per-band channel / TX power.
+coordinates, and five live columns per band (`_2g` / `_5g` / `_6g`):
+`ch_*` channel, `bw_*` operating width, `txpw_*` TX power, `sta_*` associated
+clients, and `rstate_*` — `RUN` when the radio is on air, `INIT` or blank when
+it is configured but not serving.
 
 ## Reverse: import Hamina → UniFi InnerSpace
 

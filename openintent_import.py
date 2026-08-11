@@ -827,13 +827,30 @@ def load_catalog(args, http_, base):
 
 def _plan_title(override, name, limit=32):
     """InnerSpace caps plan titles at 32 chars. Use --plan-title as-is (trimmed)
-    if given; otherwise '<name> (imported)', truncating the name to fit."""
+    if given; otherwise the plan's own name, unchanged where it fits.
+
+    The name is deliberately NOT decorated. This used to append " (imported)",
+    which cost 11 of the 32 characters and forced every name longer than 21 to
+    be truncated mid-word: "Floor-Plan-Size-Upstairs" became
+    "Floor-Plan-Size-Upsta (imported)".
+
+    That breaks the round trip. Hamina matches a vendor floor to its own map by
+    name ("floor plans must match!"), so a decorated or clipped title silently
+    stops the plan resolving back to the map it came from — and the failure
+    surfaces from Hamina as an unattributable import error, with nothing
+    pointing at the name.
+    """
     if override:
         return override[:limit]
-    suffix = " (imported)"
-    room = limit - len(suffix)
-    base = name if len(name) <= room else name[:room].rstrip("- ")
-    return base + suffix
+    if len(name) <= limit:
+        return name
+    clipped = name[:limit].rstrip("- ")
+    print("warning: plan name %r exceeds InnerSpace's %d-character limit and "
+          "was clipped to %r.\n"
+          "  -> it will no longer match a Hamina map of the original name; "
+          "rename the plan in Hamina to something shorter, or pass "
+          "--plan-title." % (name, limit, clipped), file=sys.stderr)
+    return clipped
 
 
 # --- orchestration -------------------------------------------------------

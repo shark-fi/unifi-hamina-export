@@ -108,7 +108,9 @@ Others: `/api/project/plan{,/upload,/order}`, `/api/project/wall-type`,
   - `map` — floor-plan image (`urlImage`), offset, scale
   - `scale` — two points + real-world length; `.height` = ceiling height (m)
   - `device` — `productId`, `meta.mac`/`ip`, position, `mount`, rotation
-  - `wall` — two points + `variant` (concrete/drywall/glass/metal/door_metal)
+  - `wall` — two points + `variant` (14 built-ins: concrete, drywall,
+    drywall_heavy, glass, glass_thin, brick, metal, wood, door_wood,
+    door_metal, door_glass, window_{1,2,3}_pane)
 - `products[]` — `productId` → `sku` (`U7-Pro-Max`) and `category` (`wifi`)
 
 Devices with `planId: null` are unplaced and skipped.
@@ -137,6 +139,13 @@ as `file://images/...`). Output validates against the official OpenIntent 2.0
 schema. Zip conventions follow
 [oiconvert](https://github.com/yourwificz/oiconvert), the community Ekahau →
 OpenIntent converter tested against Hamina's importer.
+
+Wall segments carry a `wall_type` spelled the way Hamina spells it — `Drywall
+(Heavy)`, `Door (Wooden)`, `Window` — because Hamina **drops** a segment whose
+type it doesn't recognise rather than falling back to a default. `WALL_VARIANTS`
+covers all 14 InnerSpace variants; anything outside it warns loudly instead of
+exporting a guessed label. Two Hamina types have no InnerSpace equivalent and
+degrade on the way through: `Railing` → `Drywall`, `Fireplace` → `Brick`.
 
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
 coordinates, and five live columns per band (`_2g` / `_5g` / `_6g`):

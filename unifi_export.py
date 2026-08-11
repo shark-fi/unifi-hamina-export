@@ -37,6 +37,7 @@ Stdlib only. Self-signed controller certs are accepted for local/legacy.
 """
 
 import argparse
+import collections
 import csv
 import datetime
 import getpass
@@ -428,20 +429,36 @@ INNERSPACE_SKU_ALIASES = {
 }
 
 # InnerSpace wall variant -> (OpenIntent wall_type label, attenuation dB)
-# Attenuation values are InnerSpace's own defaults for these materials; Hamina
-# maps unknown wall types onto its own library, so the label matters most.
-# Verified against a real import: 25 InnerSpace "concrete" walls exported as
-# wall_segments (pixel start/end via scene_to_pixels, no y-flip) rendered
-# correctly in Hamina, aligned with the APs, and drove the RF coverage sim.
+# Attenuation values are InnerSpace's own defaults for these materials.
+#
+# The label has to be spelled the way Hamina spells it. Hamina does NOT map an
+# unrecognised wall_type onto its own library -- it drops the segment. An
+# earlier version of this table covered 8 of InnerSpace's 14 variants and named
+# them freely ("Metal Door", "Wood Door"), so the six it missed fell through to
+# a .title() of the variant ("Drywall_Heavy", "Window_1_Pane") and the ones it
+# renamed did not match either. Round-tripping a real 214-wall plan out of
+# Hamina, into InnerSpace and back, 86 walls (40%) returned under a label
+# Hamina had never sent, and vanished on import.
+#
+# Labels marked (v) are verified against a Hamina OpenIntent export. The rest
+# follow the same naming pattern but have not been seen in real Hamina output;
+# keep them distinct from one another, since openintent_import.py inverts this
+# table and colliding labels would make that inverse lossy.
 WALL_VARIANTS = {
-    "concrete": ("Concrete", 12.0),
-    "drywall": ("Drywall", 3.0),
+    "concrete": ("Concrete", 12.0),                     # (v)
+    "drywall": ("Drywall", 3.0),                        # (v)
+    "drywall_heavy": ("Drywall (Heavy)", 5.0),          # (v)
     "glass": ("Glass", 6.0),
-    "metal": ("Metal", 20.0),
-    "door_metal": ("Metal Door", 15.0),
-    "door_wood": ("Wood Door", 3.0),
+    "glass_thin": ("Glass (Thin)", 3.0),
     "brick": ("Brick", 10.0),
+    "metal": ("Metal", 20.0),
     "wood": ("Wood", 4.0),
+    "door_wood": ("Door (Wooden)", 3.0),                # (v)
+    "door_metal": ("Door (Metal)", 15.0),               # (v)
+    "door_glass": ("Door (Glass)", 6.0),                # (v)
+    "window_1_pane": ("Window", 3.0),                   # (v)
+    "window_2_pane": ("Window (Double Pane)", 5.0),
+    "window_3_pane": ("Window (Triple Pane)", 7.0),
 }
 
 
@@ -488,6 +505,7 @@ def run_innerspace(args):
     plans = {p["id"]: p for p in data.get("plans") or []}
     products = {p["id"]: p for p in data.get("products") or []}
     unit_imperial = (data.get("project") or {}).get("unit") == "imperial"
+    unknown_variants = collections.Counter()
 
     by_plan = {}
     for s in shapes:
@@ -581,8 +599,14 @@ def run_innerspace(args):
             pts = s.get("position") or []
             if len(pts) < 2:
                 continue
-            label, _att = WALL_VARIANTS.get(
-                s.get("variant"), (str(s.get("variant") or "Wall").title(), 0))
+            variant = s.get("variant")
+            if variant in WALL_VARIANTS:
+                label = WALL_VARIANTS[variant][0]
+            else:
+                # Guessing a label here means Hamina drops the wall on import,
+                # so say so rather than losing it quietly.
+                label = str(variant or "Wall").title()
+                unknown_variants[variant] += 1
             x1, y1 = scene_to_pixels(pts[0], map_shape, img_w, img_h)
             x2, y2 = scene_to_pixels(pts[1], map_shape, img_w, img_h)
             segs.append({"wall_type": label,
@@ -670,6 +694,11 @@ def run_innerspace(args):
             print(f"openintent: wrote {args.openintent} — {len(floorplans)} "
                   f"floor plan(s), {len(aps_out)} AP(s), {walls} wall(s), "
                   f"{len(images)} image(s)")
+    for variant, n in unknown_variants.most_common():
+        print(f"warning: {n} wall(s) use InnerSpace variant {variant!r}, which "
+              f"has no OpenIntent label in WALL_VARIANTS — exported as "
+              f"{str(variant or 'Wall').title()!r}, which Hamina will most "
+              f"likely drop on import", file=sys.stderr)
     if unit_imperial:
         print("note: this project is set to imperial in InnerSpace; "
               "OpenIntent carries metres (Hamina converts for display).",

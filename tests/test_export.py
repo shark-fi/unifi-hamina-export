@@ -574,3 +574,44 @@ class PlanTitle(unittest.TestCase):
     def test_override_still_wins(self):
         self.assertEqual(_plan_title("Custom", "Anything"), "Custom")
         self.assertEqual(len(_plan_title("Z" * 40, "Anything")), 32)
+
+
+class PasswordResolution(unittest.TestCase):
+    """--password puts the secret in `ps` for every user on the host.
+
+    The bridge runs this exporter as a scheduled subprocess, so the password was
+    on that command line continuously. UNIFI_PASSWORD is the way to pass it; the
+    flag stays for compatibility and for one-off interactive runs.
+    """
+
+    def setUp(self):
+        self.env = os.environ.get("UNIFI_PASSWORD")
+        os.environ.pop("UNIFI_PASSWORD", None)
+
+    def tearDown(self):
+        os.environ.pop("UNIFI_PASSWORD", None)
+        if self.env is not None:
+            os.environ["UNIFI_PASSWORD"] = self.env
+
+    def _args(self, password=None):
+        return argparse.Namespace(password=password, username="admin")
+
+    def test_flag_wins(self):
+        os.environ["UNIFI_PASSWORD"] = "from-env"
+        self.assertEqual(ux.resolve_password(self._args("from-flag")), "from-flag")
+
+    def test_environment_is_used_when_no_flag(self):
+        os.environ["UNIFI_PASSWORD"] = "from-env"
+        self.assertEqual(ux.resolve_password(self._args()), "from-env")
+
+    def test_no_password_and_no_terminal_exits_with_a_reason(self):
+        """A non-interactive caller must not block forever on an invisible
+        prompt — that is how a scheduled job hangs until someone notices."""
+        err = io.StringIO()
+        stderr, sys.stderr = sys.stderr, err
+        try:
+            with self.assertRaises(SystemExit):
+                ux.resolve_password(self._args())
+        finally:
+            sys.stderr = stderr
+        self.assertIn("UNIFI_PASSWORD", err.getvalue())

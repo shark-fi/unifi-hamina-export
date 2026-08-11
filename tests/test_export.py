@@ -9,9 +9,14 @@ Stdlib only, no test framework to install:
 
     python3 -m unittest discover -s tests -v
 """
+import argparse
+import json
 import os
+import struct
 import sys
+import tempfile
 import unittest
+import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -240,6 +245,162 @@ class CsvRadioColumns(unittest.TestCase):
         for band in ("2g", "5g", "6g"):
             for prefix in ("ch", "bw", "txpw", "sta", "rstate"):
                 self.assertIn(f"{prefix}_{band}", ux.CSV_COLUMNS)
+
+
+SWITCH_DEV = {
+    "name": "USW Pro Max 24 PoE", "serial": "F4E2C6AABBCC",
+    "total_max_power": 400,
+    "port_table": ([{"port_idx": i, "media": "GE"} for i in range(1, 25)]
+                   + [{"port_idx": i, "media": "SFP+"} for i in range(25, 27)]),
+}
+
+
+class Switches(unittest.TestCase):
+    """Switches sit in the InnerSpace project already positioned; they were
+    filtered out one line before they could be used."""
+
+    def _sw(self, dev=None, sku="USW-Pro-Max-24-PoE"):
+        coords = [{"coordinate_xyz": {"x": 10.0, "y": 20.0, "unit": "pixels"}}]
+        return ux.oi_switch(dev if dev is not None else SWITCH_DEV, sku,
+                            "Upstairs", coords, "USW Pro Max 24 PoE",
+                            "192.168.5.3")
+
+    def test_name_is_always_present(self):
+        """The only field the OpenIntent 2.0 schema requires."""
+        self.assertEqual(self._sw()["name"], "USW Pro Max 24 PoE")
+        self.assertEqual(self._sw(dev={}, sku="")["name"],
+                         "USW Pro Max 24 PoE")
+
+    def test_position_and_identity_carry_over(self):
+        sw = self._sw()
+        self.assertEqual(sw["floorplan_name"], "Upstairs")
+        self.assertEqual(sw["coordinates"][0]["coordinate_xyz"]["x"], 10.0)
+        self.assertEqual(sw["ip_address"], "192.168.5.3")
+        self.assertEqual(sw["serial_number"], "F4E2C6AABBCC")
+        self.assertEqual(sw["sku"], "USW-Pro-Max-24-PoE")
+
+    def test_ports_split_copper_from_sfp(self):
+        sw = self._sw()
+        self.assertEqual(sw["copper_port_count"], 24)
+        self.assertEqual(sw["modular_port_count"], 2)
+        self.assertEqual(sw["poe_budget"], 400)
+
+    def test_ports_without_media_count_as_copper(self):
+        """Older firmware omits `media`; those are RJ45, not SFP."""
+        dev = {"port_table": [{"port_idx": 1}, {"port_idx": 2}]}
+        sw = self._sw(dev=dev)
+        self.assertEqual(sw["copper_port_count"], 2)
+        self.assertNotIn("modular_port_count", sw)
+
+    def test_unjoined_switch_still_exports(self):
+        """No Network-app match: it is still a positioned node, not a drop."""
+        sw = self._sw(dev={})
+        self.assertEqual(sw["floorplan_name"], "Upstairs")
+        for absent in ("serial_number", "poe_budget", "copper_port_count"):
+            self.assertNotIn(absent, sw)
+
+
+def _png(w, h):
+    """Enough PNG for image_size(): signature + IHDR width/height."""
+    return (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+            + struct.pack(">II", w, h) + b"\x08\x06\x00\x00\x00" + b"\x00" * 8)
+
+
+PROJECT = {"data": {
+    "project": {"title": "Home", "unit": "imperial"},
+    "plans": [{"id": "p1", "title": "Upstairs"}],
+    "products": [
+        {"id": "prod-ap", "sku": "U7-Pro", "category": "wifi"},
+        {"id": "prod-sw", "sku": "USW-Pro-Max-24-PoE", "category": "switching"},
+        {"id": "prod-cam", "sku": "UVC-G5-Turret-Ultra",
+         "category": "camera_security"},
+    ],
+    "shapes": [
+        {"type": "map", "planId": "p1", "urlImage": "/img.png",
+         "position": [{"x": 0, "y": 0, "z": 0}], "scale": {"x": 1, "y": 1}},
+        {"type": "scale", "planId": "p1", "scale": 10.0, "height": 2.5,
+         "position": [{"x": 0, "y": 0, "z": 0}, {"x": 100, "y": 0, "z": 0}]},
+        {"type": "wall", "planId": "p1", "variant": "drywall",
+         "position": [{"x": -100, "y": -100, "z": 0},
+                      {"x": 100, "y": -100, "z": 0}]},
+        {"type": "device", "planId": "p1", "productId": "prod-ap",
+         "title": "U7-Pro-Bedroom", "mount": "ceiling",
+         "meta": {"mac": "9C05D6AEFFDC", "ip": "192.168.5.209"},
+         "position": [{"x": 10, "y": 20, "z": 0}]},
+        {"type": "device", "planId": "p1", "productId": "prod-sw",
+         "title": "USW Pro Max 24 PoE", "mount": "wall",
+         "meta": {"mac": "F4E2C6EAEADF", "ip": "192.168.5.3"},
+         "position": [{"x": -30, "y": 40, "z": 0}]},
+        {"type": "device", "planId": "p1", "productId": "prod-cam",
+         "title": "Doorbell", "meta": {"mac": "AABBCCDDEEFF"},
+         "position": [{"x": 0, "y": 0, "z": 0}]},
+    ],
+}}
+
+
+class _FakeHttp:
+    def __init__(self, *a, **kw):
+        pass
+
+    def request(self, method, url, raw=False):
+        return 200, {"Content-Type": "image/png"}, _png(1000, 600)
+
+
+class SwitchExportEndToEnd(unittest.TestCase):
+    """Drive run_innerspace over a synthetic project and read the zip back."""
+
+    def _run(self, **overrides):
+        args = argparse.Namespace(
+            host="https://console", username="u", password="p",
+            verify_tls=False, no_radio=True, no_walls=False, no_switches=False,
+            plan=None, ap_height=2.5, include_down_radios=False)
+        with tempfile.TemporaryDirectory() as tmp:
+            proj = os.path.join(tmp, "project.json")
+            with open(proj, "w") as f:
+                json.dump(PROJECT, f)
+            args.project_json = proj
+            args.openintent = os.path.join(tmp, "out.zip")
+            for k, v in overrides.items():
+                setattr(args, k, v)
+            real_http, real_login = ux.Http, ux.legacy_login
+            ux.Http, ux.legacy_login = _FakeHttp, lambda *a, **kw: None
+            try:
+                rows = ux.run_innerspace(args)
+            finally:
+                ux.Http, ux.legacy_login = real_http, real_login
+            with zipfile.ZipFile(args.openintent) as zf:
+                return json.load(zf.open("openintent.json")), rows
+
+    def test_switch_reaches_the_openintent_zip(self):
+        data, _rows = self._run()
+        self.assertEqual([s["name"] for s in data["switches"]],
+                         ["USW Pro Max 24 PoE"])
+        self.assertEqual(len(data["accesspoints"]), 1)
+
+    def test_switch_is_positioned_on_the_same_plan_as_the_ap(self):
+        data, _rows = self._run()
+        sw, ap = data["switches"][0], data["accesspoints"][0]
+        self.assertEqual(sw["floorplan_name"], ap["floorplan_name"])
+        self.assertIn("coordinates", sw)
+
+    def test_non_network_gear_is_still_skipped(self):
+        """A camera is not a switch; only 'switching' comes through."""
+        data, _rows = self._run()
+        names = [s["name"] for s in data["switches"]]
+        self.assertNotIn("Doorbell", names)
+
+    def test_no_switches_flag_omits_the_key(self):
+        data, rows = self._run(no_switches=True)
+        self.assertNotIn("switches", data)
+        self.assertEqual([r["type"] for r in rows], ["uap"])
+
+    def test_switch_gets_a_csv_row_typed_usw(self):
+        _data, rows = self._run()
+        types = sorted(r["type"] for r in rows)
+        self.assertEqual(types, ["uap", "usw"])
+        sw_row = next(r for r in rows if r["type"] == "usw")
+        self.assertEqual(sw_row["ip"], "192.168.5.3")
+        self.assertEqual(sw_row["rstate_5g"], "")
 
 
 if __name__ == "__main__":

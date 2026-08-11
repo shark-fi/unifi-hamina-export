@@ -538,6 +538,7 @@ def run_innerspace(args):
                   "exporting placement only", file=sys.stderr)
 
     floorplans, aps_out, images, rows = [], [], {}, []
+    switches_out = []
     for pid, group in by_plan.items():
         plan = plans.get(pid) or {}
         title = plan.get("title") or pid
@@ -633,21 +634,25 @@ def run_innerspace(args):
             fp["wall_segments"] = segs
         floorplans.append(fp)
 
-        # access points
-        n_out = 0
+        # access points and switches
+        n_out = n_sw = 0
         for s in group:
             if s.get("type") != "device":
                 continue
             prod = products.get(s.get("productId")) or {}
-            if prod.get("category") != "wifi":
+            category = prod.get("category")
+            if category not in ("wifi", "switching"):
+                continue
+            if category == "switching" and args.no_switches:
                 continue
             pts = s.get("position") or []
             if not pts:
                 continue
             x_px, y_px = scene_to_pixels(pts[0], map_shape, img_w, img_h)
+            kind = "AP" if category == "wifi" else "switch"
             if not (-1 <= x_px <= img_w + 1 and -1 <= y_px <= img_h + 1):
-                print(f"warning: AP '{s.get('title')}' maps outside the image "
-                      f"({x_px:.0f},{y_px:.0f} vs {img_w}x{img_h}) — "
+                print(f"warning: {kind} '{s.get('title')}' maps outside the "
+                      f"image ({x_px:.0f},{y_px:.0f} vs {img_w}x{img_h}) — "
                       "coordinate assumption may be wrong for this plan",
                       file=sys.stderr)
             z_m = ceiling if s.get("mount") == "ceiling" else args.ap_height
@@ -662,6 +667,28 @@ def run_innerspace(args):
             mac = (s.get("meta") or {}).get("mac") or ""
             dev = radio_by_mac.get(mac.replace(":", "").upper(), {})
             sku = prod.get("sku") or ""
+            ip = (s.get("meta") or {}).get("ip", "")
+            mac_colons = ""
+            if mac:
+                m = mac.replace(":", "").lower()
+                mac_colons = ":".join(m[i:i + 2] for i in range(0, len(m), 2))
+
+            if category == "switching":
+                name = s.get("title") or dev.get("name") or sku
+                switches_out.append(
+                    oi_switch(dev, sku, fp["name"], coords, name, ip))
+                n_sw += 1
+                row = blank_row()
+                row.update(source="innerspace", site=title, name=name,
+                           model=sku, mac=mac_colons, ip=ip, type="usw",
+                           map_name=title,
+                           x_px=round(x_px, 2), y_px=round(y_px, 2),
+                           map_upp=round(mpp, 6) if mpp else "",
+                           x_m=round(x_px * mpp, 2) if mpp else "",
+                           y_m=round(y_px * mpp, 2) if mpp else "")
+                rows.append(row)
+                continue
+
             # radio state comes from the Network app when joined; otherwise
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
@@ -672,17 +699,15 @@ def run_innerspace(args):
             ap["model_original"] = sku
             ap["antennas"] = [{"vendor": "ubiquiti", "model": model,
                                "bands": ap["antennas"][0]["bands"]}]
-            if mac:
-                m = mac.replace(":", "").lower()
-                ap["mac_address"] = ":".join(m[i:i + 2]
-                                             for i in range(0, len(m), 2))
+            if mac_colons:
+                ap["mac_address"] = mac_colons
             aps_out.append(ap)
             n_out += 1
 
             row = blank_row()
             row.update(source="innerspace", site=title,
                        name=ap["name"], model=sku, mac=ap.get("mac_address", ""),
-                       ip=(s.get("meta") or {}).get("ip", ""),
+                       ip=ip,
                        type="uap", map_name=title,
                        x_px=round(x_px, 2), y_px=round(y_px, 2),
                        map_upp=round(mpp, 6) if mpp else "",
@@ -691,8 +716,9 @@ def run_innerspace(args):
             fill_radio_columns(row, dev)
             rows.append(row)
 
-        print(f"plan '{title}': {n_out} AP(s), {len(segs)} wall(s), "
-              f"{img_w}x{img_h}px"
+        print(f"plan '{title}': {n_out} AP(s), "
+              + (f"{n_sw} switch(es), " if n_sw else "")
+              + f"{len(segs)} wall(s), {img_w}x{img_h}px"
               + (f", {mpp:.4f} m/px, ceiling {ceiling:.2f} m" if mpp else
                  ", no scale"))
 
@@ -702,6 +728,8 @@ def run_innerspace(args):
         else:
             data_out = {"openintent_version": "2.0.1",
                         "accesspoints": aps_out, "floorplans": floorplans}
+            if switches_out:
+                data_out["switches"] = switches_out
             with zipfile.ZipFile(args.openintent, "w",
                                  zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("openintent.json", json.dumps(data_out, indent=2))
@@ -709,8 +737,10 @@ def run_innerspace(args):
                     zf.writestr(rel, blob)
             walls = sum(len(f.get("wall_segments") or []) for f in floorplans)
             print(f"openintent: wrote {args.openintent} — {len(floorplans)} "
-                  f"floor plan(s), {len(aps_out)} AP(s), {walls} wall(s), "
-                  f"{len(images)} image(s)")
+                  f"floor plan(s), {len(aps_out)} AP(s), "
+                  + (f"{len(switches_out)} switch(es), " if switches_out
+                     else "")
+                  + f"{walls} wall(s), {len(images)} image(s)")
     for variant, n in unknown_variants.most_common():
         print(f"warning: {n} wall(s) use InnerSpace variant {variant!r}, which "
               f"has no OpenIntent label in WALL_VARIANTS — exported as "
@@ -1247,6 +1277,43 @@ def oi_ap(dev, fp_name, coords, include_down=False):
     return ap
 
 
+# UniFi port media strings that are not copper RJ45.
+SFP_MEDIA = {"SFP", "SFP+", "SFP28", "SFP56", "QSFP", "QSFP+", "QSFP28"}
+
+
+def oi_switch(dev, sku, fp_name, coords, name, ip=""):
+    """OpenIntent 2.0 switch object.
+
+    Only `name` is required by the schema; everything else is filled in where
+    the Network-app join actually has it, so an unjoined switch still exports
+    as a positioned node rather than being dropped."""
+    sw = {"name": name, "manufacturer": "Ubiquiti"}
+    if fp_name:
+        sw["floorplan_name"] = fp_name
+    if coords:
+        sw["coordinates"] = coords
+    if sku:
+        sw["model"] = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
+        sw["sku"] = sku
+    if ip:
+        sw["ip_address"] = ip
+    if dev.get("serial"):
+        sw["serial_number"] = dev["serial"]
+
+    ports = dev.get("port_table") or []
+    # media is absent on older firmware; those ports are copper.
+    modular = sum(1 for p in ports
+                  if str(p.get("media") or "").upper() in SFP_MEDIA)
+    if len(ports) - modular:
+        sw["copper_port_count"] = len(ports) - modular
+    if modular:
+        sw["modular_port_count"] = modular
+    poe = dev.get("total_max_power")
+    if isinstance(poe, (int, float)) and poe > 0:
+        sw["poe_budget"] = poe
+    return sw
+
+
 def build_openintent_unplaced(site_data, args):
     """No floor-plan positions available (classic Maps gone): emit APs with
     their real radio config on a placeholder floor plan, so Hamina imports the
@@ -1481,6 +1548,9 @@ def main():
                    help="omit wall segments from the OpenIntent export")
     i.add_argument("--no-radio", action="store_true",
                    help="skip the Network-app join for channel/tx power")
+    i.add_argument("--no-switches", action="store_true",
+                   help="omit switches from the OpenIntent export (default: "
+                        "include any switch placed on a floor plan)")
     i.add_argument("--include-down-radios", action="store_true",
                    help="keep radios whose live state is not RUN (default: "
                         "drop them, so the plan does not predict coverage "

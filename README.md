@@ -35,7 +35,13 @@ access only"). A ui.com cloud account hits MFA and cannot log in from a script.
 
 `innerspace` also joins the Network app by MAC to fill in live channel, width
 and TX power per radio (`--no-radio` to skip). `--no-walls` omits wall segments;
-`--plan NAME` limits export to matching floors.
+`--no-switches` omits switches; `--plan NAME` limits export to matching floors.
+
+Switches placed on a floor plan export to OpenIntent's `switches[]` alongside
+the APs, carrying position, model, IP, serial, copper and SFP port counts and
+PoE budget. Only `name` is required by the schema, so a switch that the Network
+app join doesn't match still exports as a positioned node. Cameras, door access
+and other InnerSpace gear are not exported.
 
 `legacy` mode works only on Network versions that still have classic Maps.
 Newer consoles return `api.err.InvalidObject` / `api.err.NotFound` — use

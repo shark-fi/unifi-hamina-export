@@ -10,6 +10,7 @@ Stdlib only, no test framework to install:
     python3 -m unittest discover -s tests -v
 """
 import argparse
+import io
 import json
 import os
 import struct
@@ -23,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unifi_export as ux
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
-    load_obstacle_sidecar, to_scene as oi_to_scene,
+    load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
 )
 
 
@@ -534,3 +535,42 @@ class YConvention(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PlanTitle(unittest.TestCase):
+    """Plan titles must survive the round trip Hamina -> UniFi -> Hamina.
+
+    Hamina matches a vendor floor to its own map BY NAME ("floor plans must
+    match!"). A decorated or clipped title stops the plan resolving back to the
+    map it came from, and Hamina reports it as an unattributable import error
+    that names nothing useful. This used to append " (imported)", spending 11 of
+    InnerSpace's 32 characters and truncating every name longer than 21.
+    """
+
+    def test_name_is_used_verbatim(self):
+        self.assertEqual(_plan_title(None, "Floor-Plan-Size-Upstairs"),
+                         "Floor-Plan-Size-Upstairs")
+
+    def test_no_decoration_is_added(self):
+        for name in ("Basement", "Level 3", "Floor-Plan-Size-Basement"):
+            self.assertEqual(_plan_title(None, name), name)
+            self.assertNotIn("(imported)", _plan_title(None, name))
+
+    def test_name_at_the_limit_is_untouched(self):
+        name = "X" * 32
+        self.assertEqual(_plan_title(None, name), name)
+
+    def test_over_limit_is_clipped_and_warned(self):
+        name = "Y" * 40
+        err = io.StringIO()
+        stderr, sys.stderr = sys.stderr, err
+        try:
+            title = _plan_title(None, name)
+        finally:
+            sys.stderr = stderr
+        self.assertEqual(len(title), 32)
+        self.assertIn("no longer match a Hamina map", err.getvalue())
+
+    def test_override_still_wins(self):
+        self.assertEqual(_plan_title("Custom", "Anything"), "Custom")
+        self.assertEqual(len(_plan_title("Z" * 40, "Anything")), 32)

@@ -440,25 +440,30 @@ INNERSPACE_SKU_ALIASES = {
 # Hamina, into InnerSpace and back, 86 walls (40%) returned under a label
 # Hamina had never sent, and vanished on import.
 #
-# Labels marked (v) are verified against a Hamina OpenIntent export. The rest
-# follow the same naming pattern but have not been seen in real Hamina output;
-# keep them distinct from one another, since openintent_import.py inverts this
-# table and colliding labels would make that inverse lossy.
+# Every label below is verified against Hamina's own wall-type picker, which
+# offers exactly: Brick, Concrete, Cubicle, Door (Glass), Door (Metal),
+# Door (Wooden), Drywall, Drywall (Heavy), Elevator, Glass, Glass (Thin),
+# Metal, Railing, Window, Window (Tinted), Wood.
+#
+# Hamina has no double- or triple-pane window, so all three InnerSpace pane
+# variants collapse onto "Window": one pane of information is worth losing,
+# a dropped wall is not. openintent_import.py inverts this table first-wins,
+# so "Window" comes back as window_1_pane.
 WALL_VARIANTS = {
-    "concrete": ("Concrete", 12.0),                     # (v)
-    "drywall": ("Drywall", 3.0),                        # (v)
-    "drywall_heavy": ("Drywall (Heavy)", 5.0),          # (v)
+    "concrete": ("Concrete", 12.0),
+    "drywall": ("Drywall", 3.0),
+    "drywall_heavy": ("Drywall (Heavy)", 5.0),
     "glass": ("Glass", 6.0),
     "glass_thin": ("Glass (Thin)", 3.0),
     "brick": ("Brick", 10.0),
     "metal": ("Metal", 20.0),
     "wood": ("Wood", 4.0),
-    "door_wood": ("Door (Wooden)", 3.0),                # (v)
-    "door_metal": ("Door (Metal)", 15.0),               # (v)
-    "door_glass": ("Door (Glass)", 6.0),                # (v)
-    "window_1_pane": ("Window", 3.0),                   # (v)
-    "window_2_pane": ("Window (Double Pane)", 5.0),
-    "window_3_pane": ("Window (Triple Pane)", 7.0),
+    "door_wood": ("Door (Wooden)", 3.0),
+    "door_metal": ("Door (Metal)", 15.0),
+    "door_glass": ("Door (Glass)", 6.0),
+    "window_1_pane": ("Window", 3.0),
+    "window_2_pane": ("Window", 5.0),
+    "window_3_pane": ("Window", 7.0),
 }
 
 
@@ -506,6 +511,7 @@ def run_innerspace(args):
     products = {p["id"]: p for p in data.get("products") or []}
     unit_imperial = (data.get("project") or {}).get("unit") == "imperial"
     unknown_variants = collections.Counter()
+    wall_types = {w["id"]: w for w in data.get("wallTypes") or [] if w.get("id")}
 
     by_plan = {}
     for s in shapes:
@@ -600,7 +606,18 @@ def run_innerspace(args):
             if len(pts) < 2:
                 continue
             variant = s.get("variant")
-            if variant in WALL_VARIANTS:
+            if variant == "custom":
+                # A custom wall carries variant "custom" and its real name in
+                # wallTypes -- "Fireplace", "Railing", anything the user drew
+                # in Hamina that has no built-in InnerSpace variant. Passing
+                # the name straight through is what lets those round-trip
+                # exactly instead of collapsing onto a built-in.
+                label = (wall_types.get(s.get("wallTypeId"), {})
+                         .get("name") or "").strip()
+                if not label:
+                    label = "Wall"
+                    unknown_variants["custom (unnamed wall type)"] += 1
+            elif variant in WALL_VARIANTS:
                 label = WALL_VARIANTS[variant][0]
             else:
                 # Guessing a label here means Hamina drops the wall on import,

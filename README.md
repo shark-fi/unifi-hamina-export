@@ -143,9 +143,16 @@ OpenIntent converter tested against Hamina's importer.
 Wall segments carry a `wall_type` spelled the way Hamina spells it — `Drywall
 (Heavy)`, `Door (Wooden)`, `Window` — because Hamina **drops** a segment whose
 type it doesn't recognise rather than falling back to a default. `WALL_VARIANTS`
-covers all 14 InnerSpace variants; anything outside it warns loudly instead of
-exporting a guessed label. Two Hamina types have no InnerSpace equivalent and
-degrade on the way through: `Railing` → `Drywall`, `Fireplace` → `Brick`.
+covers all 14 InnerSpace built-in variants using labels checked against
+Hamina's own wall-type picker; anything outside it warns loudly instead of
+exporting a guessed label.
+
+A **custom** InnerSpace wall type (`variant: "custom"` plus a `wallTypeId`)
+exports under its own name, so a wall drawn as `Fireplace` in Hamina, imported
+as a matching custom type, comes back as `Fireplace`. Hamina types that get
+mapped onto a built-in variant on the way in can only return as that built-in:
+`Railing` and `Cubicle` → `Drywall`, `Elevator` → `Metal`, `Window (Tinted)` →
+`Window`. Drawing them as custom types in InnerSpace avoids the loss.
 
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
 coordinates, and five live columns per band (`_2g` / `_5g` / `_6g`):

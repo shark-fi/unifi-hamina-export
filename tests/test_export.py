@@ -23,7 +23,17 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import unifi_export as ux
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
+    load_obstacle_sidecar, to_scene as oi_to_scene,
 )
+
+
+def oi_sidecar(sidecar, floorplans):
+    """load_obstacle_sidecar takes a path; feed it one from a dict."""
+    with tempfile.TemporaryDirectory() as tmp:
+        p = os.path.join(tmp, "obstacles.json")
+        with open(p, "w") as f:
+            json.dump(sidecar, f)
+        return load_obstacle_sidecar(p, floorplans)
 
 # Hamina's built-in wall types, read off its own wall-type picker. It drops a
 # segment whose wall_type it does not recognise rather than defaulting it, so a
@@ -478,6 +488,48 @@ class SwitchExportEndToEnd(unittest.TestCase):
         sw_row = next(r for r in rows if r["type"] == "usw")
         self.assertEqual(sw_row["ip"], "192.168.5.3")
         self.assertEqual(sw_row["rstate_5g"], "")
+
+
+class YConvention(unittest.TestCase):
+    """OpenIntent pixel y measures UP from the bottom-left.
+
+    Nothing catches this being wrong through a Hamina -> InnerSpace -> Hamina
+    round trip, because the same convention applies in both directions. It only
+    shows when something draws the coordinates against the image."""
+
+    def test_scene_to_pixels_does_not_flip_y(self):
+        """A scene point above the image centre must land in the upper half of
+        OpenIntent's y range, not the lower."""
+        shape = {"position": [{"x": 0, "y": 0}], "scale": {"x": 1, "y": 1}}
+        _x, y = ux.scene_to_pixels({"x": 0, "y": 100}, shape, 1000.0, 600.0)
+        self.assertEqual(y, 400.0)
+
+    def test_scene_to_pixels_is_its_own_inverse_via_to_scene(self):
+        shape = {"position": [{"x": 0, "y": 0}], "scale": {"x": 1, "y": 1}}
+        px, py = ux.scene_to_pixels({"x": 30, "y": -80}, shape, 1000.0, 600.0)
+        self.assertEqual(oi_to_scene(px, py, 1000.0, 600.0), (30.0, -80.0))
+
+    def test_obstacle_sidecar_y_is_measured_from_the_top(self):
+        """The side-car is authored against the image, so an obstacle near the
+        top of the plan must end up near the top -- which means its y is
+        flipped into OpenIntent's bottom-up space on the way in."""
+        floorplans = [{"name": "Upstairs", "img_w": 1000.0, "img_h": 600.0}]
+        sidecar = {"obstacles": [{
+            "floorplan": "Upstairs", "material": "car", "unit": "pixels",
+            "polygon": [[100, 50], [200, 50], [200, 100], [100, 100]]}]}
+        parsed = oi_sidecar(sidecar, floorplans)
+        ys = [y for _x, y in parsed["Upstairs"][0]["polygon"]]
+        # authored at y 50..100 from the top of a 600px image
+        self.assertEqual(sorted(ys), [500.0, 500.0, 550.0, 550.0])
+
+    def test_obstacle_x_is_untouched(self):
+        floorplans = [{"name": "Upstairs", "img_w": 1000.0, "img_h": 600.0}]
+        sidecar = {"obstacles": [{
+            "floorplan": "Upstairs", "material": "car", "unit": "pixels",
+            "polygon": [[100, 50], [200, 50], [200, 100]]}]}
+        parsed = oi_sidecar(sidecar, floorplans)
+        xs = sorted(x for x, _y in parsed["Upstairs"][0]["polygon"])
+        self.assertEqual(xs, [100.0, 200.0, 200.0])
 
 
 if __name__ == "__main__":

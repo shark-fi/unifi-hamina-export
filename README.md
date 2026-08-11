@@ -226,14 +226,28 @@ full format.
 
 ## Notes
 
-- Wall attenuation values in `WALL_VARIANTS` are defaults; Hamina maps wall
-  types onto its own library, so the label matters more than the number.
+- Wall attenuation values in `WALL_VARIANTS` are defaults and Hamina uses its
+  own library anyway, so the label matters and the number does not — but the
+  label has to match Hamina's spelling exactly, because an unrecognised
+  `wall_type` is dropped, not defaulted.
 - Ceiling-mounted APs use the plan's own ceiling height; others use
   `--ap-height` (default 2.5 m).
 - TLS verification is off by default for local consoles (self-signed certs).
   `--verify-tls` enables it.
 - Every call `unifi_export.py` makes is a GET. Writes happen only in
   `openintent_import.py`, and only when you pass `--commit`.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Stdlib only, no network, no console. They cover the two things that go wrong
+here quietly — radios exported from configured intent rather than live state,
+and wall types spelled in a vocabulary Hamina doesn't accept. Both shipped once
+looking like clean exports, because the AP and wall *counts* were right and
+only the values were wrong.
 
 ## Disclaimer
 

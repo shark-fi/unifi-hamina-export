@@ -132,12 +132,29 @@ Devices with `planId: null` are unplaced and skipped.
 ### Coordinates
 
 Scene units **are image pixels, with the origin at the image centre and y
-pointing up**. Converting to OpenIntent (origin top-left, y down):
+pointing up**. OpenIntent pixel coordinates keep y pointing up as well,
+measured from the **bottom-left** corner — so converting only re-centres, with
+no y-flip:
 
 ```
 x_px = (x - map.position.x) / map.scale.x + image_width / 2
-y_px = image_height / 2 - (y - map.position.y) / map.scale.y
+y_px = (y - map.position.y) / map.scale.y + image_height / 2
 ```
+
+Three independent things confirm y is up-from-the-bottom rather than
+down-from-the-top, which is worth recording because the opposite reading looks
+just as plausible and both round-trip cleanly:
+
+- an AP exported at `y = 0.63 × height` is physically in a room at the **top**
+  of the plan — i.e. 0.37 down from the top
+- the live-map renderer had to apply `y → height - y` before plotting into an
+  SVG, which measures y down
+- the `legacy` path converts classic Maps positions, which are top-left/y-down
+  image pixels, with an explicit `y = image_height - y`
+
+The **obstacle side-car** (`--obstacles`) is the deliberate exception: it is
+authored by hand against the image, so its coordinates are top-left/y-down and
+the importer flips them on the way in.
 
 Metres per pixel comes from the user's scale line:
 

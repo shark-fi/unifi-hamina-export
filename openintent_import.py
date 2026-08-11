@@ -368,8 +368,9 @@ def _polygon_pixels(obj) -> list:
 #
 # A bare top-level list is also accepted. `floorplan` may be omitted when the
 # export has a single floor. `unit` is "pixels" (default) or "meters" — both
-# measured from the image TOP-LEFT corner, x right / y down (same axes as
-# wall_segments). `material` maps through atten_variant() to an InnerSpace
+# measured from the image TOP-LEFT corner, x right / y down — the axes you read
+# off an image editor, NOT the bottom-left/y-up axes wall_segments use; the
+# parser flips y on the way in. `material` maps through atten_variant() to an InnerSpace
 # attenuation-object variant. Geometry is a `polygon` ([[x,y],...] or
 # [{"x":..,"y":..},...]) or an axis-aligned `rect` {cx,cy,w,h}.
 def _sidecar_polygon(obj) -> list:
@@ -399,7 +400,8 @@ def load_obstacle_sidecar(path: str, floorplans: list) -> dict:
     """Parse an --obstacles side-car and return {floorplan_name: [{material,
     polygon(pixels)}, ...]}, ready to merge into fp['atten']. Raises RuntimeError
     with an actionable message on any malformed entry."""
-    raw = json.load(open(path, encoding="utf-8"))
+    with open(path, encoding="utf-8") as f:
+        raw = json.load(f)
     items = raw.get("obstacles") if isinstance(raw, dict) else raw
     if not isinstance(items, list):
         raise RuntimeError('obstacle side-car must be a JSON list or '
@@ -429,8 +431,21 @@ def load_obstacle_sidecar(path: str, floorplans: list) -> dict:
         elif unit not in ("pixels", "pixel", "px"):
             raise RuntimeError("obstacle #%d: unit must be 'pixels' or 'meters', "
                                "got %r" % (i, unit))
+        # The side-car is the one input a human authors against the image as
+        # they see it: top-left origin, y down, straight off an image editor.
+        # Everything downstream -- wall_segments, AP coordinates, to_scene --
+        # is OpenIntent pixel space, which measures y UP from the bottom-left.
+        # Flip once, here, where the user's numbers enter the pipeline. Without
+        # this an obstacle drawn at the top of the plan landed at the bottom.
+        if fp.get("img_h"):
+            pts = [(x, fp["img_h"] - y) for x, y in pts]
         material = (obj.get("material") or obj.get("type") or obj.get("name") or "")
         out[fpn].append({"material": material, "polygon": pts})
+    if out:
+        print("note: obstacle coordinates are read from the image TOP-LEFT "
+              "corner, y down. A side-car whose numbers were tuned by trial "
+              "and error against an earlier build will now be mirrored "
+              "vertically — check it against the plan.", file=sys.stderr)
     return dict(out)
 
 
@@ -466,8 +481,9 @@ def obstacle_template(floorplans: list) -> dict:
         "_comment": ("Starter obstacle side-car from --dump-obstacle-template. "
                      "Edit/duplicate the entries, drop the ones you don't need, "
                      "then import with --obstacles <this file>. Coordinates are "
-                     "from the image TOP-LEFT corner, x right / y down (same axes "
-                     "as the walls). Materials: car, truck, cubicles, elevator, "
+                     "from the image TOP-LEFT corner, x right / y down — what you "
+                     "read off an image editor; the importer flips y for you. "
+                     "Materials: car, truck, cubicles, elevator, "
                      "foliage_light/heavy, human_crowd, machinery, server_rack, "
                      "shelf_small/medium/warehouse (many aliases resolve)."),
         "_floorplans": dims,

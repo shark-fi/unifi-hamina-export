@@ -13,7 +13,9 @@
     "              Many plain-English aliases resolve (wardrobe, fridge, rack, ...);",
     "              anything unknown falls back to cubicles with a warning.",
     "  unit      : 'pixels' (default) or 'meters' — both measured from the image",
-    "              TOP-LEFT corner, x right / y down (same axes as wall_segments).",
+    "              TOP-LEFT corner, x right / y down, i.e. the coordinates you",
+    "              read straight off an image editor. (wall_segments in the",
+    "              export use bottom-left/y-up; the importer flips these for you.)",
     "  geometry  : either a 'polygon' ([[x,y],...] or [{\"x\":..,\"y\":..},...], >=3 pts)",
     "              or an axis-aligned 'rect' {cx,cy,w,h}.",
     "Keys starting with '_' are ignored."

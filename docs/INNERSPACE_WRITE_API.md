@@ -106,8 +106,9 @@ placed as `attenuationObject` shapes. See `obstacles.example.json`.
 - `material` — mapped to a built-in variant (above); many plain-English aliases
   resolve (`wardrobe`/`fridge`/`rack`/…), unknown → `cubicles` with a warning.
 - `unit` — `pixels` (default) or `meters`, both from the image **top-left**
-  corner, x right / y down (same axes as `wall_segments`); metres are scaled by
-  the floorplan's own px/m.
+  corner, x right / y down — the axes you read off an image editor, *not* the
+  bottom-left/y-up axes `wall_segments` use; the importer flips y on the way in.
+  Metres are scaled by the floorplan's own px/m.
 - geometry — a `polygon` (`[[x,y],…]` or `[{x,y},…]`, ≥3 pts) or axis-aligned
   `rect` `{cx,cy,w,h}`. A bare top-level list is also accepted.
 

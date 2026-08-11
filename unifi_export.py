@@ -139,6 +139,32 @@ def fill_radio_columns(row, dev):
 # cloud: Site Manager API (api.ui.com)
 # --------------------------------------------------------------------------
 
+
+def resolve_password(args) -> str:
+    """The console password, from --password, the environment, or a prompt.
+
+    Order matters. ``--password`` is honoured first for compatibility, but it is
+    the worst of the three: an argument is visible in ``ps`` output to every user
+    on the host for as long as the process runs. ``UNIFI_PASSWORD`` is the way a
+    caller should pass it — notably the unifi-hamina-live bridge, which runs this
+    as a subprocess on a schedule.
+
+    Prompting is last, and only when there is a terminal to prompt. Without this
+    check a non-interactive caller that forgot the password gets a subprocess
+    blocked forever on a prompt nobody can see, which is a far worse failure than
+    exiting with a reason.
+    """
+    if getattr(args, "password", None):
+        return args.password
+    env = os.environ.get("UNIFI_PASSWORD")
+    if env:
+        return env
+    if sys.stdin is not None and sys.stdin.isatty():
+        return getpass.getpass(f"password for {args.username}: ")
+    die("no password: pass --password, or set UNIFI_PASSWORD in the environment "
+        "(there is no terminal here to prompt on)")
+
+
 def run_cloud(args):
     http_ = Http(verify=True)
     headers = {"X-API-KEY": args.api_key}
@@ -284,7 +310,7 @@ def run_legacy(args):
     # default: skip TLS verification (self-signed certs are the norm)
     http_ = Http(verify=args.verify_tls)
     base = args.host.rstrip("/")
-    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    password = resolve_password(args)
     prefix = legacy_login(http_, base, args.username, password)
     api = f"{base}{prefix}/api"
 
@@ -496,7 +522,7 @@ def scene_to_pixels(pt, map_shape, img_w, img_h):
 def run_innerspace(args):
     http_ = Http(verify=args.verify_tls)
     base = args.host.rstrip("/")
-    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    password = resolve_password(args)
     legacy_login(http_, base, args.username, password)
 
     if args.project_json:
@@ -921,7 +947,7 @@ def discover_api(http_, base, site, keyword="innerspace", context=200):
 def run_probe(args):
     http_ = Http(verify=args.verify_tls)
     base = args.host.rstrip("/")
-    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    password = resolve_password(args)
     legacy_login(http_, base, args.username, password)
     site = args.site or "default"
 
@@ -1002,7 +1028,7 @@ def _iso_now():
 def run_confirm_write(args):
     http_ = Http(verify=args.verify_tls)
     base = args.host.rstrip("/")
-    password = args.password or getpass.getpass(f"password for {args.username}: ")
+    password = resolve_password(args)
     legacy_login(http_, base, args.username, password)
     api = f"{base}{INNERSPACE_API}"
 

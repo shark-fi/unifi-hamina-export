@@ -338,12 +338,74 @@ PROJECT = {"data": {
 }}
 
 
+# The Network app's own label for the switch differs from the InnerSpace shape
+# title on purpose: connected_switch.switch_name references switches[], so the
+# name we exported has to win over this one.
+NETWORK_DEVICES = [
+    {"mac": "9c:05:d6:ae:ff:dc", "model": "U7PRO", "name": "U7-Pro-Bedroom",
+     "radio_table_stats": LIVE, "radio_table": CONFIGURED,
+     "uplink": {"type": "wire", "uplink_mac": "f4:e2:c6:ea:ea:df",
+                "uplink_remote_port": 5,
+                "uplink_device_name": "USW-Pro-Max-24-PoE"}},
+    dict(SWITCH_DEV, mac="f4:e2:c6:ea:ea:df", model="USWPROMAX24POE"),
+]
+
+
 class _FakeHttp:
     def __init__(self, *a, **kw):
         pass
 
     def request(self, method, url, raw=False):
         return 200, {"Content-Type": "image/png"}, _png(1000, 600)
+
+    def get_json(self, url):
+        if url.endswith("/self/sites"):
+            return {"data": [{"name": "default"}]}
+        if url.endswith("/stat/device"):
+            return {"data": NETWORK_DEVICES}
+        return {"data": []}
+
+
+class ConnectedSwitch(unittest.TestCase):
+    """AP -> switch port topology, from the wired uplink."""
+
+    WIRED = {"uplink": {"type": "wire", "uplink_mac": "f4:e2:c6:ea:ea:df",
+                        "uplink_remote_port": 5,
+                        "uplink_device_name": "Network label"}}
+
+    def test_placed_switch_name_wins_over_the_network_label(self):
+        cs = ux.oi_connected_switch(
+            self.WIRED, {"F4E2C6EAEADF": "USW Pro Max 24 PoE"})
+        self.assertEqual(cs["switch_name"], "USW Pro Max 24 PoE")
+
+    def test_falls_back_to_the_network_label(self):
+        """An unplaced switch still records real topology."""
+        cs = ux.oi_connected_switch(self.WIRED, {})
+        self.assertEqual(cs["switch_name"], "Network label")
+
+    def test_port_is_a_string(self):
+        """UniFi reports an int; the schema types this field as a string."""
+        cs = ux.oi_connected_switch(self.WIRED, {})
+        self.assertEqual(cs["port"], "5")
+
+    def test_switch_id_carries_the_mac(self):
+        cs = ux.oi_connected_switch(self.WIRED, {})
+        self.assertEqual(cs["switch_id"], "f4:e2:c6:ea:ea:df")
+
+    def test_wireless_uplink_gets_no_switch(self):
+        """A meshed AP has no switch port; claiming one invents topology."""
+        dev = {"uplink": {"type": "wireless", "uplink_mac": "aa:bb:cc:dd:ee:ff"}}
+        self.assertIsNone(ux.oi_connected_switch(dev, {}))
+
+    def test_no_uplink_at_all(self):
+        self.assertIsNone(ux.oi_connected_switch({}, {}))
+        self.assertIsNone(ux.oi_connected_switch({"uplink": {}}, {}))
+
+    def test_absent_port_still_yields_the_switch(self):
+        dev = {"uplink": {"type": "wire", "uplink_mac": "f4:e2:c6:ea:ea:df"}}
+        cs = ux.oi_connected_switch(dev, {})
+        self.assertNotIn("port", cs)
+        self.assertEqual(cs["switch_id"], "f4:e2:c6:ea:ea:df")
 
 
 class SwitchExportEndToEnd(unittest.TestCase):
@@ -352,7 +414,7 @@ class SwitchExportEndToEnd(unittest.TestCase):
     def _run(self, **overrides):
         args = argparse.Namespace(
             host="https://console", username="u", password="p",
-            verify_tls=False, no_radio=True, no_walls=False, no_switches=False,
+            verify_tls=False, no_radio=False, no_walls=False, no_switches=False,
             plan=None, ap_height=2.5, include_down_radios=False)
         with tempfile.TemporaryDirectory() as tmp:
             proj = os.path.join(tmp, "project.json")
@@ -393,6 +455,21 @@ class SwitchExportEndToEnd(unittest.TestCase):
         data, rows = self._run(no_switches=True)
         self.assertNotIn("switches", data)
         self.assertEqual([r["type"] for r in rows], ["uap"])
+
+    def test_ap_references_the_exported_switch_by_name(self):
+        data, _rows = self._run()
+        cs = data["accesspoints"][0]["connected_switch"]
+        names = [s["name"] for s in data["switches"]]
+        self.assertIn(cs["switch_name"], names,
+                      "connected_switch must reference a switch in switches[]")
+        self.assertEqual(cs["port"], "5")
+
+    def test_switch_port_counts_come_from_the_network_join(self):
+        data, _rows = self._run()
+        sw = data["switches"][0]
+        self.assertEqual(sw["copper_port_count"], 24)
+        self.assertEqual(sw["modular_port_count"], 2)
+        self.assertEqual(sw["poe_budget"], 400)
 
     def test_switch_gets_a_csv_row_typed_usw(self):
         _data, rows = self._run()

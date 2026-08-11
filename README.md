@@ -43,6 +43,14 @@ PoE budget. Only `name` is required by the schema, so a switch that the Network
 app join doesn't match still exports as a positioned node. Cameras, door access
 and other InnerSpace gear are not exported.
 
+Each AP also carries `connected_switch` — `switch_name`, `switch_id` (the
+uplink MAC) and `port` — read from its wired uplink in the Network app, giving
+Hamina the AP-to-switch-port topology. `switch_name` resolves against
+`switches[]` wherever the switch is placed, falling back to the Network app's
+own label otherwise. A meshed AP gets no `connected_switch`: it has no switch
+port, and inventing one would be worse than omitting it. This is AP metadata,
+so it survives `--no-switches`.
+
 `legacy` mode works only on Network versions that still have classic Maps.
 Newer consoles return `api.err.InvalidObject` / `api.err.NotFound` — use
 `innerspace`. `--unplaced` exports APs with radio config onto a placeholder

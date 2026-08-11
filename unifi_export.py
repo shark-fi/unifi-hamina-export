@@ -519,6 +519,20 @@ def run_innerspace(args):
         if pid:
             by_plan.setdefault(pid, []).append(s)
 
+    # Switch names for AP connected_switch, keyed on MAC. Built up front over
+    # every plan: an AP is routinely uplinked to a switch on a different floor,
+    # so resolving this inside the per-plan loop would miss those.
+    switch_names = {}
+    for s in shapes:
+        if s.get("type") != "device":
+            continue
+        prod = products.get(s.get("productId")) or {}
+        if prod.get("category") != "switching":
+            continue
+        mac = ((s.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+        if mac:
+            switch_names[mac] = s.get("title") or prod.get("sku") or ""
+
     # optional: live radio state from the Network app, joined on MAC
     radio_by_mac = {}
     if not args.no_radio:
@@ -693,7 +707,8 @@ def run_innerspace(args):
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
                         "model": dev.get("model") or sku}, fp["name"], coords,
-                       getattr(args, "include_down_radios", False))
+                       getattr(args, "include_down_radios", False),
+                       switch_names)
             model = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
             ap["model"] = model
             ap["model_original"] = sku
@@ -1256,7 +1271,7 @@ def default_radios(model):
             for i, b in enumerate(bands)]
 
 
-def oi_ap(dev, fp_name, coords, include_down=False):
+def oi_ap(dev, fp_name, coords, include_down=False, switch_names=None):
     code = dev.get("model") or ""
     model = UNIFI_MODEL_NAMES.get(code, code.lower())
     radios = oi_radios(dev, include_down) or default_radios(code)
@@ -1274,11 +1289,46 @@ def oi_ap(dev, fp_name, coords, include_down=False):
     }
     if coords:
         ap["coordinates"] = coords
+    cs = oi_connected_switch(dev, switch_names)
+    if cs:
+        ap["connected_switch"] = cs
     return ap
 
 
 # UniFi port media strings that are not copper RJ45.
 SFP_MEDIA = {"SFP", "SFP+", "SFP28", "SFP56", "QSFP", "QSFP+", "QSFP28"}
+
+
+def oi_connected_switch(dev, switch_names=None):
+    """OpenIntent `connected_switch` from the AP's wired uplink, or None.
+
+    Only a wired uplink describes a switch port. A meshed AP uplinks over the
+    air, so claiming a switch port for it would invent topology that does not
+    exist.
+
+    `switch_name` is meant to reference an entry in switches[], so the name of
+    the switch we actually exported wins over the Network app's own label for
+    it; they differ whenever the InnerSpace shape was retitled. switch_id
+    carries the uplink MAC either way, so the link survives a name mismatch."""
+    up = dev.get("uplink") or {}
+    if up.get("type") not in (None, "", "wire"):
+        return None
+    mac = (up.get("uplink_mac") or "").lower()
+    name = ((switch_names or {}).get(mac.replace(":", "").upper())
+            or up.get("uplink_device_name") or "")
+    if not mac and not name:
+        return None
+
+    cs = {}
+    if name:
+        cs["switch_name"] = name
+    if mac:
+        cs["switch_id"] = mac
+    port = up.get("uplink_remote_port", up.get("remote_port"))
+    # the schema types port as a string, not the integer UniFi reports
+    if isinstance(port, int) and port > 0:
+        cs["port"] = str(port)
+    return cs or None
 
 
 def oi_switch(dev, sku, fp_name, coords, name, ip=""):

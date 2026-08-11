@@ -59,8 +59,13 @@ from unifi_export import (
 INNERSPACE_API = "/proxy/innerspace/api"
 NETWORK_API = "/proxy/network/api"      # authoritative adopted-device list
 # OpenIntent wall_type label -> InnerSpace variant (reverse of the exporter's own
-# labels; exact match tried first).
-WALL_LABEL_TO_VARIANT = {label: variant for variant, (label, _att) in WALL_VARIANTS.items()}
+# labels; exact match tried first). First-wins, because several InnerSpace
+# variants share a label where Hamina draws no distinction -- all three window
+# pane counts export as "Window", and the first, window_1_pane, is the one to
+# come back.
+WALL_LABEL_TO_VARIANT = {}
+for _variant, (_label, _att) in WALL_VARIANTS.items():
+    WALL_LABEL_TO_VARIANT.setdefault(_label, _variant)
 # model (as the exporter emits it) -> InnerSpace SKU (reverse of the export aliases).
 MODEL_TO_SKU = {model: sku for sku, model in INNERSPACE_SKU_ALIASES.items()}
 
@@ -85,6 +90,9 @@ _WALL_ALIASES = {
     "glass": "glass", "glass thin": "glass_thin", "thin glass": "glass_thin",
     "brick": "brick",
     "metal": "metal", "steel": "metal", "sheet metal": "metal",
+    # An elevator shaft is an RF metal box; the 'drywall' default was badly
+    # wrong for it. InnerSpace has no shaft wall, so metal is the closest.
+    "elevator": "metal", "elevator shaft": "metal", "lift shaft": "metal",
     "wood": "wood", "wooden": "wood", "plywood": "wood", "timber": "wood",
     "wood door": "door_wood", "wooden door": "door_wood", "door wood": "door_wood",
     "metal door": "door_metal", "door metal": "door_metal", "steel door": "door_metal",

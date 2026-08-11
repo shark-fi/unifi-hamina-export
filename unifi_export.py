@@ -37,6 +37,7 @@ Stdlib only. Self-signed controller certs are accepted for local/legacy.
 """
 
 import argparse
+import collections
 import csv
 import datetime
 import getpass
@@ -428,20 +429,41 @@ INNERSPACE_SKU_ALIASES = {
 }
 
 # InnerSpace wall variant -> (OpenIntent wall_type label, attenuation dB)
-# Attenuation values are InnerSpace's own defaults for these materials; Hamina
-# maps unknown wall types onto its own library, so the label matters most.
-# Verified against a real import: 25 InnerSpace "concrete" walls exported as
-# wall_segments (pixel start/end via scene_to_pixels, no y-flip) rendered
-# correctly in Hamina, aligned with the APs, and drove the RF coverage sim.
+# Attenuation values are InnerSpace's own defaults for these materials.
+#
+# The label has to be spelled the way Hamina spells it. Hamina does NOT map an
+# unrecognised wall_type onto its own library -- it drops the segment. An
+# earlier version of this table covered 8 of InnerSpace's 14 variants and named
+# them freely ("Metal Door", "Wood Door"), so the six it missed fell through to
+# a .title() of the variant ("Drywall_Heavy", "Window_1_Pane") and the ones it
+# renamed did not match either. Round-tripping a real 214-wall plan out of
+# Hamina, into InnerSpace and back, 86 walls (40%) returned under a label
+# Hamina had never sent, and vanished on import.
+#
+# Every label below is verified against Hamina's own wall-type picker, which
+# offers exactly: Brick, Concrete, Cubicle, Door (Glass), Door (Metal),
+# Door (Wooden), Drywall, Drywall (Heavy), Elevator, Glass, Glass (Thin),
+# Metal, Railing, Window, Window (Tinted), Wood.
+#
+# Hamina has no double- or triple-pane window, so all three InnerSpace pane
+# variants collapse onto "Window": one pane of information is worth losing,
+# a dropped wall is not. openintent_import.py inverts this table first-wins,
+# so "Window" comes back as window_1_pane.
 WALL_VARIANTS = {
     "concrete": ("Concrete", 12.0),
     "drywall": ("Drywall", 3.0),
+    "drywall_heavy": ("Drywall (Heavy)", 5.0),
     "glass": ("Glass", 6.0),
-    "metal": ("Metal", 20.0),
-    "door_metal": ("Metal Door", 15.0),
-    "door_wood": ("Wood Door", 3.0),
+    "glass_thin": ("Glass (Thin)", 3.0),
     "brick": ("Brick", 10.0),
+    "metal": ("Metal", 20.0),
     "wood": ("Wood", 4.0),
+    "door_wood": ("Door (Wooden)", 3.0),
+    "door_metal": ("Door (Metal)", 15.0),
+    "door_glass": ("Door (Glass)", 6.0),
+    "window_1_pane": ("Window", 3.0),
+    "window_2_pane": ("Window", 5.0),
+    "window_3_pane": ("Window", 7.0),
 }
 
 
@@ -488,12 +510,28 @@ def run_innerspace(args):
     plans = {p["id"]: p for p in data.get("plans") or []}
     products = {p["id"]: p for p in data.get("products") or []}
     unit_imperial = (data.get("project") or {}).get("unit") == "imperial"
+    unknown_variants = collections.Counter()
+    wall_types = {w["id"]: w for w in data.get("wallTypes") or [] if w.get("id")}
 
     by_plan = {}
     for s in shapes:
         pid = s.get("planId")
         if pid:
             by_plan.setdefault(pid, []).append(s)
+
+    # Switch names for AP connected_switch, keyed on MAC. Built up front over
+    # every plan: an AP is routinely uplinked to a switch on a different floor,
+    # so resolving this inside the per-plan loop would miss those.
+    switch_names = {}
+    for s in shapes:
+        if s.get("type") != "device":
+            continue
+        prod = products.get(s.get("productId")) or {}
+        if prod.get("category") != "switching":
+            continue
+        mac = ((s.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+        if mac:
+            switch_names[mac] = s.get("title") or prod.get("sku") or ""
 
     # optional: live radio state from the Network app, joined on MAC
     radio_by_mac = {}
@@ -514,6 +552,7 @@ def run_innerspace(args):
                   "exporting placement only", file=sys.stderr)
 
     floorplans, aps_out, images, rows = [], [], {}, []
+    switches_out = []
     for pid, group in by_plan.items():
         plan = plans.get(pid) or {}
         title = plan.get("title") or pid
@@ -581,8 +620,25 @@ def run_innerspace(args):
             pts = s.get("position") or []
             if len(pts) < 2:
                 continue
-            label, _att = WALL_VARIANTS.get(
-                s.get("variant"), (str(s.get("variant") or "Wall").title(), 0))
+            variant = s.get("variant")
+            if variant == "custom":
+                # A custom wall carries variant "custom" and its real name in
+                # wallTypes -- "Fireplace", "Railing", anything the user drew
+                # in Hamina that has no built-in InnerSpace variant. Passing
+                # the name straight through is what lets those round-trip
+                # exactly instead of collapsing onto a built-in.
+                label = (wall_types.get(s.get("wallTypeId"), {})
+                         .get("name") or "").strip()
+                if not label:
+                    label = "Wall"
+                    unknown_variants["custom (unnamed wall type)"] += 1
+            elif variant in WALL_VARIANTS:
+                label = WALL_VARIANTS[variant][0]
+            else:
+                # Guessing a label here means Hamina drops the wall on import,
+                # so say so rather than losing it quietly.
+                label = str(variant or "Wall").title()
+                unknown_variants[variant] += 1
             x1, y1 = scene_to_pixels(pts[0], map_shape, img_w, img_h)
             x2, y2 = scene_to_pixels(pts[1], map_shape, img_w, img_h)
             segs.append({"wall_type": label,
@@ -592,21 +648,25 @@ def run_innerspace(args):
             fp["wall_segments"] = segs
         floorplans.append(fp)
 
-        # access points
-        n_out = 0
+        # access points and switches
+        n_out = n_sw = 0
         for s in group:
             if s.get("type") != "device":
                 continue
             prod = products.get(s.get("productId")) or {}
-            if prod.get("category") != "wifi":
+            category = prod.get("category")
+            if category not in ("wifi", "switching"):
+                continue
+            if category == "switching" and args.no_switches:
                 continue
             pts = s.get("position") or []
             if not pts:
                 continue
             x_px, y_px = scene_to_pixels(pts[0], map_shape, img_w, img_h)
+            kind = "AP" if category == "wifi" else "switch"
             if not (-1 <= x_px <= img_w + 1 and -1 <= y_px <= img_h + 1):
-                print(f"warning: AP '{s.get('title')}' maps outside the image "
-                      f"({x_px:.0f},{y_px:.0f} vs {img_w}x{img_h}) — "
+                print(f"warning: {kind} '{s.get('title')}' maps outside the "
+                      f"image ({x_px:.0f},{y_px:.0f} vs {img_w}x{img_h}) — "
                       "coordinate assumption may be wrong for this plan",
                       file=sys.stderr)
             z_m = ceiling if s.get("mount") == "ceiling" else args.ap_height
@@ -621,27 +681,48 @@ def run_innerspace(args):
             mac = (s.get("meta") or {}).get("mac") or ""
             dev = radio_by_mac.get(mac.replace(":", "").upper(), {})
             sku = prod.get("sku") or ""
+            ip = (s.get("meta") or {}).get("ip", "")
+            mac_colons = ""
+            if mac:
+                m = mac.replace(":", "").lower()
+                mac_colons = ":".join(m[i:i + 2] for i in range(0, len(m), 2))
+
+            if category == "switching":
+                name = s.get("title") or dev.get("name") or sku
+                switches_out.append(
+                    oi_switch(dev, sku, fp["name"], coords, name, ip))
+                n_sw += 1
+                row = blank_row()
+                row.update(source="innerspace", site=title, name=name,
+                           model=sku, mac=mac_colons, ip=ip, type="usw",
+                           map_name=title,
+                           x_px=round(x_px, 2), y_px=round(y_px, 2),
+                           map_upp=round(mpp, 6) if mpp else "",
+                           x_m=round(x_px * mpp, 2) if mpp else "",
+                           y_m=round(y_px * mpp, 2) if mpp else "")
+                rows.append(row)
+                continue
+
             # radio state comes from the Network app when joined; otherwise
             # the InnerSpace SKU drives the default band set
             ap = oi_ap({**dev, "name": s.get("title") or sku,
                         "model": dev.get("model") or sku}, fp["name"], coords,
-                       getattr(args, "include_down_radios", False))
+                       getattr(args, "include_down_radios", False),
+                       switch_names)
             model = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
             ap["model"] = model
             ap["model_original"] = sku
             ap["antennas"] = [{"vendor": "ubiquiti", "model": model,
                                "bands": ap["antennas"][0]["bands"]}]
-            if mac:
-                m = mac.replace(":", "").lower()
-                ap["mac_address"] = ":".join(m[i:i + 2]
-                                             for i in range(0, len(m), 2))
+            if mac_colons:
+                ap["mac_address"] = mac_colons
             aps_out.append(ap)
             n_out += 1
 
             row = blank_row()
             row.update(source="innerspace", site=title,
                        name=ap["name"], model=sku, mac=ap.get("mac_address", ""),
-                       ip=(s.get("meta") or {}).get("ip", ""),
+                       ip=ip,
                        type="uap", map_name=title,
                        x_px=round(x_px, 2), y_px=round(y_px, 2),
                        map_upp=round(mpp, 6) if mpp else "",
@@ -650,8 +731,9 @@ def run_innerspace(args):
             fill_radio_columns(row, dev)
             rows.append(row)
 
-        print(f"plan '{title}': {n_out} AP(s), {len(segs)} wall(s), "
-              f"{img_w}x{img_h}px"
+        print(f"plan '{title}': {n_out} AP(s), "
+              + (f"{n_sw} switch(es), " if n_sw else "")
+              + f"{len(segs)} wall(s), {img_w}x{img_h}px"
               + (f", {mpp:.4f} m/px, ceiling {ceiling:.2f} m" if mpp else
                  ", no scale"))
 
@@ -661,6 +743,8 @@ def run_innerspace(args):
         else:
             data_out = {"openintent_version": "2.0.1",
                         "accesspoints": aps_out, "floorplans": floorplans}
+            if switches_out:
+                data_out["switches"] = switches_out
             with zipfile.ZipFile(args.openintent, "w",
                                  zipfile.ZIP_DEFLATED) as zf:
                 zf.writestr("openintent.json", json.dumps(data_out, indent=2))
@@ -668,8 +752,15 @@ def run_innerspace(args):
                     zf.writestr(rel, blob)
             walls = sum(len(f.get("wall_segments") or []) for f in floorplans)
             print(f"openintent: wrote {args.openintent} — {len(floorplans)} "
-                  f"floor plan(s), {len(aps_out)} AP(s), {walls} wall(s), "
-                  f"{len(images)} image(s)")
+                  f"floor plan(s), {len(aps_out)} AP(s), "
+                  + (f"{len(switches_out)} switch(es), " if switches_out
+                     else "")
+                  + f"{walls} wall(s), {len(images)} image(s)")
+    for variant, n in unknown_variants.most_common():
+        print(f"warning: {n} wall(s) use InnerSpace variant {variant!r}, which "
+              f"has no OpenIntent label in WALL_VARIANTS — exported as "
+              f"{str(variant or 'Wall').title()!r}, which Hamina will most "
+              f"likely drop on import", file=sys.stderr)
     if unit_imperial:
         print("note: this project is set to imperial in InnerSpace; "
               "OpenIntent carries metres (Hamina converts for display).",
@@ -1180,7 +1271,7 @@ def default_radios(model):
             for i, b in enumerate(bands)]
 
 
-def oi_ap(dev, fp_name, coords, include_down=False):
+def oi_ap(dev, fp_name, coords, include_down=False, switch_names=None):
     code = dev.get("model") or ""
     model = UNIFI_MODEL_NAMES.get(code, code.lower())
     radios = oi_radios(dev, include_down) or default_radios(code)
@@ -1198,7 +1289,79 @@ def oi_ap(dev, fp_name, coords, include_down=False):
     }
     if coords:
         ap["coordinates"] = coords
+    cs = oi_connected_switch(dev, switch_names)
+    if cs:
+        ap["connected_switch"] = cs
     return ap
+
+
+# UniFi port media strings that are not copper RJ45.
+SFP_MEDIA = {"SFP", "SFP+", "SFP28", "SFP56", "QSFP", "QSFP+", "QSFP28"}
+
+
+def oi_connected_switch(dev, switch_names=None):
+    """OpenIntent `connected_switch` from the AP's wired uplink, or None.
+
+    Only a wired uplink describes a switch port. A meshed AP uplinks over the
+    air, so claiming a switch port for it would invent topology that does not
+    exist.
+
+    `switch_name` is meant to reference an entry in switches[], so the name of
+    the switch we actually exported wins over the Network app's own label for
+    it; they differ whenever the InnerSpace shape was retitled. switch_id
+    carries the uplink MAC either way, so the link survives a name mismatch."""
+    up = dev.get("uplink") or {}
+    if up.get("type") not in (None, "", "wire"):
+        return None
+    mac = (up.get("uplink_mac") or "").lower()
+    name = ((switch_names or {}).get(mac.replace(":", "").upper())
+            or up.get("uplink_device_name") or "")
+    if not mac and not name:
+        return None
+
+    cs = {}
+    if name:
+        cs["switch_name"] = name
+    if mac:
+        cs["switch_id"] = mac
+    port = up.get("uplink_remote_port", up.get("remote_port"))
+    # the schema types port as a string, not the integer UniFi reports
+    if isinstance(port, int) and port > 0:
+        cs["port"] = str(port)
+    return cs or None
+
+
+def oi_switch(dev, sku, fp_name, coords, name, ip=""):
+    """OpenIntent 2.0 switch object.
+
+    Only `name` is required by the schema; everything else is filled in where
+    the Network-app join actually has it, so an unjoined switch still exports
+    as a positioned node rather than being dropped."""
+    sw = {"name": name, "manufacturer": "Ubiquiti"}
+    if fp_name:
+        sw["floorplan_name"] = fp_name
+    if coords:
+        sw["coordinates"] = coords
+    if sku:
+        sw["model"] = INNERSPACE_SKU_ALIASES.get(sku.lower(), sku.lower())
+        sw["sku"] = sku
+    if ip:
+        sw["ip_address"] = ip
+    if dev.get("serial"):
+        sw["serial_number"] = dev["serial"]
+
+    ports = dev.get("port_table") or []
+    # media is absent on older firmware; those ports are copper.
+    modular = sum(1 for p in ports
+                  if str(p.get("media") or "").upper() in SFP_MEDIA)
+    if len(ports) - modular:
+        sw["copper_port_count"] = len(ports) - modular
+    if modular:
+        sw["modular_port_count"] = modular
+    poe = dev.get("total_max_power")
+    if isinstance(poe, (int, float)) and poe > 0:
+        sw["poe_budget"] = poe
+    return sw
 
 
 def build_openintent_unplaced(site_data, args):
@@ -1435,6 +1598,9 @@ def main():
                    help="omit wall segments from the OpenIntent export")
     i.add_argument("--no-radio", action="store_true",
                    help="skip the Network-app join for channel/tx power")
+    i.add_argument("--no-switches", action="store_true",
+                   help="omit switches from the OpenIntent export (default: "
+                        "include any switch placed on a floor plan)")
     i.add_argument("--include-down-radios", action="store_true",
                    help="keep radios whose live state is not RUN (default: "
                         "drop them, so the plan does not predict coverage "

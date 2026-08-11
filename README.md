@@ -35,7 +35,21 @@ access only"). A ui.com cloud account hits MFA and cannot log in from a script.
 
 `innerspace` also joins the Network app by MAC to fill in live channel, width
 and TX power per radio (`--no-radio` to skip). `--no-walls` omits wall segments;
-`--plan NAME` limits export to matching floors.
+`--no-switches` omits switches; `--plan NAME` limits export to matching floors.
+
+Switches placed on a floor plan export to OpenIntent's `switches[]` alongside
+the APs, carrying position, model, IP, serial, copper and SFP port counts and
+PoE budget. Only `name` is required by the schema, so a switch that the Network
+app join doesn't match still exports as a positioned node. Cameras, door access
+and other InnerSpace gear are not exported.
+
+Each AP also carries `connected_switch` — `switch_name`, `switch_id` (the
+uplink MAC) and `port` — read from its wired uplink in the Network app, giving
+Hamina the AP-to-switch-port topology. `switch_name` resolves against
+`switches[]` wherever the switch is placed, falling back to the Network app's
+own label otherwise. A meshed AP gets no `connected_switch`: it has no switch
+port, and inventing one would be worse than omitting it. This is AP metadata,
+so it survives `--no-switches`.
 
 `legacy` mode works only on Network versions that still have classic Maps.
 Newer consoles return `api.err.InvalidObject` / `api.err.NotFound` — use
@@ -108,7 +122,9 @@ Others: `/api/project/plan{,/upload,/order}`, `/api/project/wall-type`,
   - `map` — floor-plan image (`urlImage`), offset, scale
   - `scale` — two points + real-world length; `.height` = ceiling height (m)
   - `device` — `productId`, `meta.mac`/`ip`, position, `mount`, rotation
-  - `wall` — two points + `variant` (concrete/drywall/glass/metal/door_metal)
+  - `wall` — two points + `variant` (14 built-ins: concrete, drywall,
+    drywall_heavy, glass, glass_thin, brick, metal, wood, door_wood,
+    door_metal, door_glass, window_{1,2,3}_pane)
 - `products[]` — `productId` → `sku` (`U7-Pro-Max`) and `category` (`wifi`)
 
 Devices with `planId: null` are unplaced and skipped.
@@ -137,6 +153,20 @@ as `file://images/...`). Output validates against the official OpenIntent 2.0
 schema. Zip conventions follow
 [oiconvert](https://github.com/yourwificz/oiconvert), the community Ekahau →
 OpenIntent converter tested against Hamina's importer.
+
+Wall segments carry a `wall_type` spelled the way Hamina spells it — `Drywall
+(Heavy)`, `Door (Wooden)`, `Window` — because Hamina **drops** a segment whose
+type it doesn't recognise rather than falling back to a default. `WALL_VARIANTS`
+covers all 14 InnerSpace built-in variants using labels checked against
+Hamina's own wall-type picker; anything outside it warns loudly instead of
+exporting a guessed label.
+
+A **custom** InnerSpace wall type (`variant: "custom"` plus a `wallTypeId`)
+exports under its own name, so a wall drawn as `Fireplace` in Hamina, imported
+as a matching custom type, comes back as `Fireplace`. Hamina types that get
+mapped onto a built-in variant on the way in can only return as that built-in:
+`Railing` and `Cubicle` → `Drywall`, `Elevator` → `Metal`, `Window (Tinted)` →
+`Window`. Drawing them as custom types in InnerSpace avoids the loss.
 
 The CSV alongside it carries name, model, MAC, IP, pixel and metre
 coordinates, and five live columns per band (`_2g` / `_5g` / `_6g`):
@@ -217,14 +247,28 @@ full format.
 
 ## Notes
 
-- Wall attenuation values in `WALL_VARIANTS` are defaults; Hamina maps wall
-  types onto its own library, so the label matters more than the number.
+- Wall attenuation values in `WALL_VARIANTS` are defaults and Hamina uses its
+  own library anyway, so the label matters and the number does not — but the
+  label has to match Hamina's spelling exactly, because an unrecognised
+  `wall_type` is dropped, not defaulted.
 - Ceiling-mounted APs use the plan's own ceiling height; others use
   `--ap-height` (default 2.5 m).
 - TLS verification is off by default for local consoles (self-signed certs).
   `--verify-tls` enables it.
 - Every call `unifi_export.py` makes is a GET. Writes happen only in
   `openintent_import.py`, and only when you pass `--commit`.
+
+## Tests
+
+```bash
+python3 -m unittest discover -s tests -v
+```
+
+Stdlib only, no network, no console. They cover the two things that go wrong
+here quietly — radios exported from configured intent rather than live state,
+and wall types spelled in a vocabulary Hamina doesn't accept. Both shipped once
+looking like clean exports, because the AP and wall *counts* were right and
+only the values were wrong.
 
 ## Disclaimer
 

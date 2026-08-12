@@ -1,8 +1,20 @@
 #!/usr/bin/env python3
 """Read-only audit of the device shapes in an InnerSpace project.
 
-Answers the question the console UI will not: for every AP shown on a floor
-plan, is that MAC still an adopted device, and is it on more than one plan?
+Answers what the console UI will not: which device shapes exist, which plan
+each one belongs to, and which of them are redundant.
+
+What this can and cannot see. The adopted-device list comes from the NETWORK
+app only. Protect cameras, Access readers and plain clients are not in it and
+never will be, so "not in the Network app" is the normal state for a large part
+of a real project -- on the console this was written against, 39 of 55 shapes.
+It is not evidence of anything on its own. An earlier version of this script
+called them all orphans, which would have meant deleting forty legitimate
+entries had anyone acted on it.
+
+The one signal that IS actionable: the same MAC appearing twice, once placed on
+a live plan and once stranded without one. That second copy is redundant, and
+`openintent_import.py --purge-placeholders` removes exactly those.
 
 Writes nothing. Run it from the unifi-hamina-export checkout:
 
@@ -71,7 +83,7 @@ def main():
 
     hdr = "%-26s %-14s %-26s %s" % ("SHAPE TITLE", "MAC", "PLAN", "STATUS")
     print(hdr); print("-" * len(hdr))
-    orphans, dupes = [], []
+    unknown, dupes = [], []
     for s in sorted(shapes, key=lambda x: (plans.get(x.get("planId"), ""),
                                            x.get("title") or "")):
         mac = norm((s.get("meta") or {}).get("mac"))
@@ -81,26 +93,35 @@ def main():
         elif _is_placeholder_mac(mac):
             status = "synthesized placeholder"
         elif mac not in adopted:
-            status = "NOT ADOPTED -> orphan"
-            orphans.append(s)
+            # NOT a fault. The Network app does not know about Protect, Access
+            # or client devices, and those are placed on floor plans routinely.
+            status = "not a Network device (Protect/Access/client?)"
+            unknown.append(s)
         else:
             site, name, typ, model = adopted[mac]
             status = "adopted (%s, %s)" % (model or typ, site)
-            if len(by_mac[mac]) > 1:
-                status += "  ** on %d plans **" % len(by_mac[mac])
+            # "on 2 plans" was misleading: a shape with no planId is not on a
+            # plan at all. Redundancy is one placed copy plus a stranded one.
+            if not s.get("planId") and any(o.get("planId") in plans
+                                           for o in by_mac[mac]):
+                status += "   ** REDUNDANT: also placed on a plan **"
                 dupes.append(s)
         print("%-26s %-14s %-26s %s"
               % ((s.get("title") or "(untitled)")[:26], mac or "-", plan[:26], status))
 
     print()
-    if orphans:
-        print("%d shape(s) reference a MAC no site has adopted — most likely a "
-              "replaced or removed device still sitting on the plan." % len(orphans))
+    if unknown:
+        print("%d shape(s) are not Network devices. Expected: Protect cameras, "
+              "Access readers and clients live in other applications. A few "
+              "may be genuinely removed hardware — this script cannot tell "
+              "which, so it does not guess." % len(unknown))
     if dupes:
-        print("%d shape(s) place the same real device on more than one plan."
-              % len(dupes))
-    if not orphans and not dupes:
-        print("Every shape maps to exactly one adopted device. Nothing stale here.")
+        print("%d shape(s) are redundant: the same device is placed on a live "
+              "plan and ALSO left stranded without one. Remove with:\n"
+              "  python3 openintent_import.py --purge-placeholders --host ... "
+              "--username ...   (add --commit)" % len(dupes))
+    else:
+        print("No redundant shapes. Every device is listed once.")
 
 
 if __name__ == "__main__":

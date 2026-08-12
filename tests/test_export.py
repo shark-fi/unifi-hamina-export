@@ -25,6 +25,7 @@ import unifi_export as ux
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
+    _synth_mac, _is_placeholder_mac,
 )
 
 
@@ -615,3 +616,67 @@ class PasswordResolution(unittest.TestCase):
         finally:
             sys.stderr = stderr
         self.assertIn("UNIFI_PASSWORD", err.getvalue())
+
+
+class DeviceIdentitySurvivesTheExport(unittest.TestCase):
+    """The MAC is the only thing tying an OpenIntent AP to real hardware.
+
+    Dropping it does not fail: the AP is exported, imported, and placed. It just
+    gets a synthesized MAC on the way in, so the console ends up holding a
+    placeholder next to the adopted AP of the same name -- a duplicate in the
+    device list, with the real device still offered as available to add. Counts
+    right, contents wrong, nothing raised.
+    """
+
+    def test_mac_is_carried_into_the_openintent_ap(self):
+        ap = ux.oi_ap({"name": "U7-Pro-Furnace", "model": "U7PRO",
+                       "mac": "78:8a:20:dd:7b:74"}, "Plan", None)
+        self.assertEqual(ap.get("mac_address"), "78:8a:20:dd:7b:74")
+
+    def test_case_and_spacing_are_normalised(self):
+        """The importer upper-cases and strips colons; feed it one shape."""
+        ap = ux.oi_ap({"name": "AP", "model": "U7PRO",
+                       "mac": " 78:8A:20:DD:7B:74 "}, "Plan", None)
+        self.assertEqual(ap.get("mac_address"), "78:8a:20:dd:7b:74")
+
+    def test_no_mac_means_no_field_rather_than_an_empty_one(self):
+        """An empty string is a value; the importer must see absence."""
+        ap = ux.oi_ap({"name": "AP", "model": "U7PRO"}, "Plan", None)
+        self.assertNotIn("mac_address", ap)
+
+
+class PlaceholderMacDetection(unittest.TestCase):
+    """What --purge-placeholders selects on.
+
+    Locally administered is the whole safety argument: real UniFi hardware is
+    globally administered without exception, so a placeholder can be told from
+    adopted kit by one bit -- no name matching, no heuristics, no chance of
+    removing something real.
+    """
+
+    def test_a_synthesized_mac_is_recognised(self):
+        self.assertTrue(_is_placeholder_mac(_synth_mac("U7-Pro-Furnace")))
+
+    def test_it_is_stable_so_reimports_do_not_multiply(self):
+        self.assertEqual(_synth_mac("DK Kitchen 7 AP"), _synth_mac("DK Kitchen 7 AP"))
+
+    def test_real_ubiquiti_macs_are_never_selected(self):
+        # every Ubiquiti OUI in the field: the 0x02 bit is clear in all of them
+        for mac in ("788A20AABBCC", "F492BFAABBCC", "802AA846AF10",
+                    "245A4CAABBCC", "E43883AABBCC", "687251AABBCC"):
+            self.assertFalse(_is_placeholder_mac(mac), mac)
+
+    def test_the_bit_is_what_counts_not_the_prefix(self):
+        """Written after a fabricated "real" MAC in this very test failed it.
+
+        AA:BB:CC looks like a plausible address and is locally administered, so
+        it would be selected. Nothing here reads the OUI -- only the bit.
+        """
+        for mac in ("AABBCCDD7B74", "02ABCDEF0123", "0A0000000000",
+                    "0600000000000"[:12]):
+            self.assertTrue(_is_placeholder_mac(mac), mac)
+
+    def test_junk_is_not_treated_as_a_placeholder(self):
+        """Unparseable must fail closed -- keeping a stray beats deleting real kit."""
+        for mac in ("", "zz", "!", "0"):
+            self.assertFalse(_is_placeholder_mac(mac), repr(mac))

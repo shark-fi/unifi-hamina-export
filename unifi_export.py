@@ -1305,6 +1305,12 @@ def oi_ap(dev, fp_name, coords, include_down=False, switch_names=None):
     ap = {
         "name": dev.get("name") or dev.get("mac") or "AP",
         "floorplan_name": fp_name,
+        # The MAC is the only thing that ties this entry to real hardware.
+        # Omitting it used to mean an importer had nothing to match on, so a
+        # round trip through OpenIntent placed a synthetic PLACEHOLDER beside
+        # the adopted AP -- a duplicate in the device list, and the real device
+        # still offered as available to add. The InnerSpace path set it after
+        # the fact; every other path silently did not.
         "manufacturer": "ubiquiti",
         "model": model,
         "model_original": code,
@@ -1313,6 +1319,9 @@ def oi_ap(dev, fp_name, coords, include_down=False, switch_names=None):
         "orientation": {"rotation": 0, "tilt": 0},
         "display_color": "#4687f0",
     }
+    mac = (dev.get("mac") or "").strip().lower()
+    if mac:
+        ap["mac_address"] = mac
     if coords:
         ap["coordinates"] = coords
     cs = oi_connected_switch(dev, switch_names)

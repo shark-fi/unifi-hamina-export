@@ -854,6 +854,69 @@ def _plan_title(override, name, limit=32):
 
 
 # --- orchestration -------------------------------------------------------
+def run_purge(args):
+    """Remove the placeholder devices earlier imports left in InnerSpace.
+
+    An OpenIntent export that carries no MAC gets a synthesized, locally
+    administered one so the AP can be placed at all. The cost is a device the
+    console treats as real: it sits in the plan's device list beside the adopted
+    AP of the same name, and the adopted one keeps being offered as available to
+    add. Re-importing a plan cleans up its own shapes, but placeholders on plans
+    you are not re-importing have had nowhere to go.
+
+    Locally administered is the whole trick. Real UniFi hardware is globally
+    administered without exception, so the bit that marks a synthesized MAC can
+    never match adopted kit -- the selection cannot take a real device by
+    accident, whatever it is named.
+    """
+    http_, base = None, ""
+    if not args.project_json or args.commit:
+        base = args.host.rstrip("/")
+        http_ = Http(verify=args.verify_tls)
+        pw = args.password or getpass.getpass("password for %s: " % args.username)
+        legacy_login(http_, base, args.username, pw)
+        apply_csrf(http_)
+
+    if args.project_json:
+        body = json.load(open(args.project_json))
+        data = body.get("data", body)
+    else:
+        data = http_.get_json("%s%s/project?mode=2D"
+                              % (base, INNERSPACE_API)).get("data", {})
+
+    plan_title = {pl.get("id"): (pl.get("title") or pl.get("id"))
+                  for pl in data.get("plans") or []}
+    doomed, kept = [], 0
+    for sh in data.get("shapes") or []:
+        if sh.get("type") != "device":
+            continue
+        mac = ((sh.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+        if mac and _is_placeholder_mac(mac):
+            doomed.append(sh)
+        else:
+            kept += 1
+
+    print("%d placeholder device(s); %d real device(s) untouched"
+          % (len(doomed), kept))
+    if not doomed:
+        print("nothing to clean up.")
+        return
+    for sh in sorted(doomed, key=lambda x: (plan_title.get(x.get("planId"), ""),
+                                            x.get("title") or "")):
+        mac = ((sh.get("meta") or {}).get("mac") or "").upper()
+        print("  %-28s %-14s  plan: %s"
+              % (sh.get("title") or "(untitled)", mac,
+                 plan_title.get(sh.get("planId"), sh.get("planId"))))
+
+    w = Writer(http_, base, str(uuid.uuid4()), dry_run=not args.commit)
+    print("\n=== %s ===" % ("COMMIT (removing from InnerSpace)" if args.commit
+                            else "DRY-RUN (no writes; re-run with --commit)"))
+    w.shape_remove(doomed)
+    if args.commit:
+        print("\nremoved %d placeholder(s). The real APs are now free to place."
+              % len(doomed))
+
+
 def run(args):
     project = parse_openintent(args.openintent)
     fps = project["floorplans"]
@@ -1040,7 +1103,9 @@ def run(args):
 def main():
     p = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("openintent", help="OpenIntent 2.0 .zip exported from Hamina")
+    p.add_argument("openintent", nargs="?",
+                   help="OpenIntent 2.0 .zip exported from Hamina "
+                        "(not needed with --purge-placeholders)")
     p.add_argument("--host", default="", help="console URL, e.g. https://192.168.1.1")
     p.add_argument("--username", default="")
     p.add_argument("--password", default="")
@@ -1067,6 +1132,11 @@ def main():
     p.add_argument("--no-replace", action="store_true",
                    help="always create a new plan; do NOT replace/refresh an "
                         "existing plan with the same title (old behavior)")
+    p.add_argument("--purge-placeholders", action="store_true",
+                   help="remove the synthesized placeholder devices earlier "
+                        "imports left behind, and exit. Lists them first; "
+                        "needs --commit to actually remove. Real adopted "
+                        "hardware can never be selected.")
     p.add_argument("--commit", action="store_true",
                    help="actually write (default is a dry-run preview)")
     args = p.parse_args()
@@ -1091,6 +1161,15 @@ def main():
         p.error("--commit needs --host / --username / --password")
     if not args.project_json and not args.host:
         p.error("provide --project-json (offline) or --host (live) for the catalog")
+    if args.purge_placeholders:
+        try:
+            run_purge(args)
+        except RuntimeError as e:
+            print("error:", e, file=sys.stderr)
+            sys.exit(1)
+        return
+    if not args.openintent:
+        p.error("an OpenIntent .zip is required (or use --purge-placeholders)")
     try:
         run(args)
     except RuntimeError as e:

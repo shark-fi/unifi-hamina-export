@@ -320,3 +320,21 @@ provided "as is", without warranty of any kind.
 ## License
 
 [MIT](LICENSE) © 2026 Mark Houtz
+
+
+## `pathloss_calibrate.py`
+
+Protect sensors report the BLE signal strength of their link to a SuperLink
+gateway, and both ends are already placed on an InnerSpace floor plan — a set of
+(distance, RSSI) measurements sitting in the building, free to collect.
+
+```bash
+python3 pathloss_calibrate.py --host https://192.168.1.1 -u admin
+```
+
+Fits `RSSI(d) = A - 10*n*log10(d)`. The **exponent** describes the building and
+transfers to any 2.4 GHz link in it (`SENSOR_PATHLOSS_EXPONENT` for
+unifi-hamina-live's locate feature). The **intercept** does not — it is BLE's
+reference at 10 dBm where an AP transmits around 20.
+
+Read-only, standard library only.

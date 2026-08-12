@@ -10,6 +10,7 @@ Stdlib only, no test framework to install:
     python3 -m unittest discover -s tests -v
 """
 import argparse
+import contextlib
 import io
 import json
 import os
@@ -25,7 +26,7 @@ import unifi_export as ux
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
-    _synth_mac, _is_placeholder_mac,
+    _synth_mac, _is_placeholder_mac, run_purge,
 )
 
 
@@ -680,3 +681,85 @@ class PlaceholderMacDetection(unittest.TestCase):
         """Unparseable must fail closed -- keeping a stray beats deleting real kit."""
         for mac in ("", "zz", "!", "0"):
             self.assertFalse(_is_placeholder_mac(mac), repr(mac))
+
+
+class PurgeSelection(unittest.TestCase):
+    """What --purge-placeholders will and will not remove.
+
+    Modelled on a real project that had 55 device shapes: five APs appearing
+    twice -- once placed, once stranded with no planId after a plan was deleted
+    out from under its shapes -- alongside 39 Protect and Access devices that
+    are simply not placed and must never be touched.
+    """
+
+    PLANS = [{"id": "P1", "title": "Basement"}, {"id": "P2", "title": "Upstairs"}]
+
+    @staticmethod
+    def shape(title, mac, plan):
+        return {"type": "device", "title": title, "planId": plan,
+                "meta": {"mac": mac}}
+
+    def purge(self, shapes):
+        """run_purge against an offline project dump; returns what it printed."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "project.json")
+            with open(path, "w") as f:
+                json.dump({"data": {"plans": self.PLANS, "shapes": shapes}}, f)
+            args = argparse.Namespace(
+                project_json=path, commit=False, host="", username="",
+                password="", verify_tls=False)
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                run_purge(args)
+            return buf.getvalue()
+
+    def test_a_stranded_copy_of_a_placed_device_is_removed(self):
+        out = self.purge([
+            self.shape("U7-Pro-Furnace", "8C3066647B74", "P1"),
+            self.shape("U7-Pro-Furnace", "8C3066647B74", None),
+        ])
+        self.assertIn("1 removable shape(s); 1 left alone", out)
+        self.assertIn("duplicate of a placed device", out)
+
+    def test_a_device_listed_once_is_never_removed(self):
+        """The console's ordinary "available to add" entry.
+
+        U6P-Furnace was unplaced and had no second copy; selecting it would have
+        deleted a legitimate entry the user explicitly wanted kept.
+        """
+        out = self.purge([self.shape("U6P-Furnace", "FCECDAFFE998", None)])
+        self.assertIn("0 removable shape(s); 1 left alone", out)
+
+    def test_devices_from_other_applications_are_left_alone(self):
+        """Protect cameras and Access readers are unplaced and not adopted in
+        the Network app. An earlier audit called all 39 of them orphans."""
+        out = self.purge([
+            self.shape("Front Doorbell", "F4E2C60EA138", None),
+            self.shape("Backyard PTZ", "28704E1FF02B", None),
+            self.shape("Water Softener", "9041B2344F8A", None),
+        ])
+        self.assertIn("0 removable shape(s); 3 left alone", out)
+
+    def test_a_placed_device_is_never_removed(self):
+        out = self.purge([self.shape("MHz-Home", "68D79A50EAF1", "P1")])
+        self.assertIn("0 removable shape(s); 1 left alone", out)
+
+    def test_the_whole_project_shape(self):
+        """Five duplicates, one placeholder, everything else untouched."""
+        aps = [("U7 Pro Outdoor", "942A6F5C41DC", "P2"),
+               ("U7-Pro-Apartment", "F4E2C6FF8C3D", "P1"),
+               ("U7-Pro-Bedroom", "9C05D6AEFFDC", "P2"),
+               ("U7-Pro-Furnace", "8C3066647B74", "P1"),
+               ("U7-Pro-Max-Kitchen", "942A6F32ADDE", "P2")]
+        shapes = []
+        for name, mac, plan in aps:
+            shapes.append(self.shape(name, mac, plan))
+            shapes.append(self.shape(name, mac, None))     # the stranded copy
+        shapes.append(self.shape("U6P-Furnace", "FCECDAFFE998", None))
+        shapes.append(self.shape("Front Doorbell", "F4E2C60EA138", None))
+        shapes.append(self.shape("ghost", _synth_mac("ghost"), None))
+
+        out = self.purge(shapes)
+        self.assertIn("6 removable shape(s); 7 left alone", out)
+        for kept in ("U6P-Furnace", "Front Doorbell"):
+            self.assertNotIn(kept, out, "%s must survive" % kept)

@@ -855,7 +855,10 @@ def _plan_title(override, name, limit=32):
 
 # --- orchestration -------------------------------------------------------
 def run_purge(args):
-    """Remove the placeholder devices earlier imports left in InnerSpace.
+    """Remove the device shapes earlier imports stranded in InnerSpace.
+
+    Two kinds, both showing up in the console the same way -- an AP listed twice
+    on a floor plan's device list.
 
     An OpenIntent export that carries no MAC gets a synthesized, locally
     administered one so the AP can be placed at all. The cost is a device the
@@ -864,7 +867,14 @@ def run_purge(args):
     add. Re-importing a plan cleans up its own shapes, but placeholders on plans
     you are not re-importing have had nowhere to go.
 
-    Locally administered is the whole trick. Real UniFi hardware is globally
+    The second kind is a shape that lost its plan. Replacing a plan removes its
+    shapes; deleting one does not, and the leftover keeps its real MAC while its
+    planId stops resolving. It is only removable when the same MAC is still
+    placed on a live plan -- then this copy is provably redundant and the one
+    holding the position stays. A device with no plan and no placed copy is the
+    console's ordinary "available to add" entry and is never touched.
+
+    Locally administered is the whole trick for the first kind. Real UniFi hardware is globally
     administered without exception, so the bit that marks a synthesized MAC can
     never match adopted kit -- the selection cannot take a real device by
     accident, whatever it is named.
@@ -886,27 +896,44 @@ def run_purge(args):
 
     plan_title = {pl.get("id"): (pl.get("title") or pl.get("id"))
                   for pl in data.get("plans") or []}
+
+    # Which MACs are actually placed on a plan right now. Replacing a plan
+    # removes its shapes; deleting one out from under them does not, and the
+    # leftovers keep their device identity while losing their planId. The
+    # console lists them alongside the placed copy, so one AP shows up twice.
+    placed = set()
+    for sh in data.get("shapes") or []:
+        if sh.get("type") == "device" and sh.get("planId") in plan_title:
+            placed.add(((sh.get("meta") or {}).get("mac") or "")
+                       .replace(":", "").upper())
+
     doomed, kept = [], 0
     for sh in data.get("shapes") or []:
         if sh.get("type") != "device":
             continue
         mac = ((sh.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+        stranded = sh.get("planId") not in plan_title
         if mac and _is_placeholder_mac(mac):
+            doomed.append(sh)
+        elif mac and stranded and mac in placed:
+            # Same device, still placed elsewhere. Removing this copy cannot
+            # lose anything: the shape that carries the position stays.
             doomed.append(sh)
         else:
             kept += 1
 
-    print("%d placeholder device(s); %d real device(s) untouched"
-          % (len(doomed), kept))
+    print("%d removable shape(s); %d left alone" % (len(doomed), kept))
+    print("  (a device with no plan and no placed copy is the console's normal "
+          "'available to add' entry, and is never selected)")
     if not doomed:
         print("nothing to clean up.")
         return
     for sh in sorted(doomed, key=lambda x: (plan_title.get(x.get("planId"), ""),
                                             x.get("title") or "")):
         mac = ((sh.get("meta") or {}).get("mac") or "").upper()
-        print("  %-28s %-14s  plan: %s"
-              % (sh.get("title") or "(untitled)", mac,
-                 plan_title.get(sh.get("planId"), sh.get("planId"))))
+        why = ("placeholder" if _is_placeholder_mac(mac)
+               else "duplicate of a placed device")
+        print("  %-28s %-14s  %s" % (sh.get("title") or "(untitled)", mac, why))
 
     w = Writer(http_, base, str(uuid.uuid4()), dry_run=not args.commit)
     print("\n=== %s ===" % ("COMMIT (removing from InnerSpace)" if args.commit
@@ -1133,10 +1160,11 @@ def main():
                    help="always create a new plan; do NOT replace/refresh an "
                         "existing plan with the same title (old behavior)")
     p.add_argument("--purge-placeholders", action="store_true",
-                   help="remove the synthesized placeholder devices earlier "
-                        "imports left behind, and exit. Lists them first; "
-                        "needs --commit to actually remove. Real adopted "
-                        "hardware can never be selected.")
+                   help="remove device shapes earlier imports stranded: "
+                        "synthesized placeholders, and copies left behind when "
+                        "a plan was deleted while the same device is still "
+                        "placed elsewhere. Lists them first; needs --commit. "
+                        "Never selects a device that is only listed once.")
     p.add_argument("--commit", action="store_true",
                    help="actually write (default is a dry-run preview)")
     args = p.parse_args()

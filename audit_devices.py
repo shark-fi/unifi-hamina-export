@@ -28,6 +28,7 @@ from collections import defaultdict
 from unifi_export import Http, legacy_login
 from openintent_import import (
     INNERSPACE_API, NETWORK_API, apply_csrf, _is_placeholder_mac,
+    classify_device_shapes,
 )
 
 
@@ -73,13 +74,21 @@ def main():
                 adopted[norm(d.get("mac"))] = (
                     site, d.get("name") or "", d.get("type") or "", d.get("model") or "")
 
+    # The same rule the purge applies, imported rather than reimplemented, so
+    # the two can never report different sets for one project. When they DID
+    # differ it was the project changing between runs -- worth being able to
+    # conclude that immediately instead of suspecting both tools.
+    removable, _kept, _total = classify_device_shapes(proj)
+    why_by_id = {id(sh): why for sh, why in removable}
+
     shapes = [s for s in (proj.get("shapes") or []) if s.get("type") == "device"]
     by_mac = defaultdict(list)
     for s in shapes:
         by_mac[norm((s.get("meta") or {}).get("mac"))].append(s)
 
-    print("\n%d device shape(s) across %d plan(s); %d adopted device(s) on %d site(s)\n"
-          % (len(shapes), len(plans), len(adopted), len(sites)))
+    print("\n%d device shape(s) across %d plan(s); %d adopted device(s) on %d "
+          "site(s); %d removable\n"
+          % (len(shapes), len(plans), len(adopted), len(sites), len(removable)))
 
     hdr = "%-26s %-14s %-26s %s" % ("SHAPE TITLE", "MAC", "PLAN", "STATUS")
     print(hdr); print("-" * len(hdr))
@@ -100,11 +109,8 @@ def main():
         else:
             site, name, typ, model = adopted[mac]
             status = "adopted (%s, %s)" % (model or typ, site)
-            # "on 2 plans" was misleading: a shape with no planId is not on a
-            # plan at all. Redundancy is one placed copy plus a stranded one.
-            if not s.get("planId") and any(o.get("planId") in plans
-                                           for o in by_mac[mac]):
-                status += "   ** REDUNDANT: also placed on a plan **"
+            if id(s) in why_by_id:
+                status += "   ** REMOVABLE: %s **" % why_by_id[id(s)]
                 dupes.append(s)
         print("%-26s %-14s %-26s %s"
               % ((s.get("title") or "(untitled)")[:26], mac or "-", plan[:26], status))
@@ -115,13 +121,13 @@ def main():
               "Access readers and clients live in other applications. A few "
               "may be genuinely removed hardware — this script cannot tell "
               "which, so it does not guess." % len(unknown))
-    if dupes:
-        print("%d shape(s) are redundant: the same device is placed on a live "
-              "plan and ALSO left stranded without one. Remove with:\n"
+    if removable:
+        print("%d shape(s) are removable (%s). Remove with:\n"
               "  python3 openintent_import.py --purge-placeholders --host ... "
-              "--username ...   (add --commit)" % len(dupes))
+              "--username ...   (add --commit)"
+              % (len(removable), ", ".join(sorted({w for _s, w in removable}))))
     else:
-        print("No redundant shapes. Every device is listed once.")
+        print("Nothing removable. Every device is listed once.")
 
 
 if __name__ == "__main__":

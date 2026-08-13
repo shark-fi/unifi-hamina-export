@@ -854,6 +854,42 @@ def _plan_title(override, name, limit=32):
 
 
 # --- orchestration -------------------------------------------------------
+def classify_device_shapes(data):
+    """Split a project's device shapes into removable and keep, with reasons.
+
+    ONE implementation, imported by audit_devices.py too. These two tools
+    describing the same set differently is worse than either being wrong: an
+    audit reporting 8 device shapes against a purge accounting for 5 sent
+    someone hunting a filtering bug in both, when the console had simply changed
+    between the runs. Sharing the rule removes that as a possible explanation.
+
+    Returns (removable, kept, total); removable is [(shape, reason)].
+    """
+    titles = {pl.get("id"): (pl.get("title") or pl.get("id"))
+              for pl in data.get("plans") or []}
+    devices = [d for d in data.get("shapes") or [] if d.get("type") == "device"]
+
+    def mac_of(sh):
+        return ((sh.get("meta") or {}).get("mac") or "").replace(":", "").upper()
+
+    # MACs on a live plan right now. Replacing a plan removes its shapes;
+    # deleting one does not, and the leftovers keep their device identity while
+    # losing their planId.
+    on_a_plan = {mac_of(d) for d in devices if d.get("planId") in titles}
+
+    removable, kept = [], []
+    for sh in devices:
+        mac, stranded = mac_of(sh), sh.get("planId") not in titles
+        if mac and _is_placeholder_mac(mac):
+            removable.append((sh, "placeholder"))
+        elif mac and stranded and mac in on_a_plan:
+            # Redundant: the shape carrying the position stays.
+            removable.append((sh, "duplicate of a placed device"))
+        else:
+            kept.append(sh)
+    return removable, kept, len(devices)
+
+
 def run_purge(args):
     """Remove the device shapes earlier imports stranded in InnerSpace.
 
@@ -901,28 +937,15 @@ def run_purge(args):
     # removes its shapes; deleting one out from under them does not, and the
     # leftovers keep their device identity while losing their planId. The
     # console lists them alongside the placed copy, so one AP shows up twice.
-    placed = set()
-    for sh in data.get("shapes") or []:
-        if sh.get("type") == "device" and sh.get("planId") in plan_title:
-            placed.add(((sh.get("meta") or {}).get("mac") or "")
-                       .replace(":", "").upper())
+    pairs, kept_shapes, total = classify_device_shapes(data)
+    doomed = [sh for sh, _ in pairs]
+    why_by_id = {id(sh): why for sh, why in pairs}
 
-    doomed, kept = [], 0
-    for sh in data.get("shapes") or []:
-        if sh.get("type") != "device":
-            continue
-        mac = ((sh.get("meta") or {}).get("mac") or "").replace(":", "").upper()
-        stranded = sh.get("planId") not in plan_title
-        if mac and _is_placeholder_mac(mac):
-            doomed.append(sh)
-        elif mac and stranded and mac in placed:
-            # Same device, still placed elsewhere. Removing this copy cannot
-            # lose anything: the shape that carries the position stays.
-            doomed.append(sh)
-        else:
-            kept += 1
-
-    print("%d removable shape(s); %d left alone" % (len(doomed), kept))
+    # The total is printed so the arithmetic is checkable at a glance. Two
+    # tools reporting different counts for the same project is how you stop
+    # trusting both of them.
+    print("%d removable shape(s); %d left alone (of %d device shape(s))"
+          % (len(doomed), len(kept_shapes), total))
     print("  (a device with no plan and no placed copy is the console's normal "
           "'available to add' entry, and is never selected)")
     if not doomed:
@@ -931,8 +954,7 @@ def run_purge(args):
     for sh in sorted(doomed, key=lambda x: (plan_title.get(x.get("planId"), ""),
                                             x.get("title") or "")):
         mac = ((sh.get("meta") or {}).get("mac") or "").upper()
-        why = ("placeholder" if _is_placeholder_mac(mac)
-               else "duplicate of a placed device")
+        why = why_by_id[id(sh)]
         print("  %-28s %-14s  %s" % (sh.get("title") or "(untitled)", mac, why))
 
     w = Writer(http_, base, str(uuid.uuid4()), dry_run=not args.commit)

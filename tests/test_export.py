@@ -38,14 +38,26 @@ def oi_sidecar(sidecar, floorplans):
             json.dump(sidecar, f)
         return load_obstacle_sidecar(p, floorplans)
 
-# Hamina's built-in wall types, read off its own wall-type picker. It drops a
-# segment whose wall_type it does not recognise rather than defaulting it, so a
-# label outside this set (plus whatever custom types the project defines) loses
-# the wall silently.
-HAMINA_WALL_TYPES = {
-    "Brick", "Concrete", "Cubicle", "Door (Glass)", "Door (Metal)",
-    "Door (Wooden)", "Drywall", "Drywall (Heavy)", "Elevator", "Glass",
-    "Glass (Thin)", "Metal", "Railing", "Window", "Window (Tinted)", "Wood",
+# The wall_type strings Hamina WRITES in its own OpenIntent export, read out of
+# a real one. Hamina drops a segment whose wall_type it does not recognise, and
+# it matches on these -- not on the display names in its wall-type picker.
+#
+# This set used to be the picker names, and this file asserted against them. It
+# passed while the exporter shipped labels Hamina rejected: a 122-wall plan
+# round-tripped and came back with 13, the only ones whose picker name and
+# library name happen to be identical ("Concrete"). A green suite proved
+# consistency with a list nobody had checked against the product.
+#
+# Add a name here only from an export that contains it.
+HAMINA_EXPORT_WALL_TYPES = {
+    "Brick wall", "Concrete", "Door Interior", "Dry wall", "Exterior Window",
+    "Metal door / wall",
+}
+# Labels the exporter emits that no Hamina export has been seen to contain.
+# They came from the picker, which is exactly the source that proved wrong for
+# the six above, so each is a wall Hamina may silently drop.
+UNVERIFIED_LABELS = {
+    "Drywall (Heavy)", "Glass", "Glass (Thin)", "Metal", "Wood", "Door (Glass)",
 }
 # Hamina types with no built-in InnerSpace variant to store them in. A wall
 # drawn as a *custom* InnerSpace type keeps its name and round-trips exactly
@@ -53,10 +65,10 @@ HAMINA_WALL_TYPES = {
 # back as that built-in. Cubicle and Elevator are attenuation objects in
 # InnerSpace rather than walls, so they land on the nearest wall material.
 DEGRADES_TO = {
-    "Railing": "Drywall",
-    "Cubicle": "Drywall",
+    "Railing": "Dry wall",
+    "Cubicle": "Dry wall",
     "Elevator": "Metal",
-    "Window (Tinted)": "Window",
+    "Window (Tinted)": "Exterior Window",
 }
 
 
@@ -78,18 +90,55 @@ class WallVocabulary(unittest.TestCase):
                              f"{variant!r} exports as {label!r}, which looks "
                              f"like the .title() fallback, not a Hamina type")
 
-    def test_every_label_is_a_hamina_wall_type(self):
-        """The whole point: a label Hamina does not offer is a lost wall."""
+    def test_every_label_is_confirmed_or_declared_unverified(self):
+        """A label is either seen in a Hamina export or flagged as a guess.
+
+        The failure this guards is not a typo -- it is confidence. The previous
+        version of this test asserted against Hamina's PICKER names and passed
+        while the exporter dropped 109 of 122 walls on a real plan.
+        """
         for variant, (label, _att) in ux.WALL_VARIANTS.items():
-            self.assertIn(label, HAMINA_WALL_TYPES,
-                          f"{variant!r} exports as {label!r}, which is not a "
-                          f"Hamina wall type and will be dropped")
+            self.assertIn(
+                label, HAMINA_EXPORT_WALL_TYPES | UNVERIFIED_LABELS,
+                f"{variant!r} exports as {label!r}, which is neither confirmed "
+                f"from a Hamina export nor declared unverified. Read the label "
+                f"out of an export before adding it.")
+
+    def test_the_six_confirmed_labels_are_exactly_what_hamina_emits(self):
+        """Byte-for-byte, because 'Dry wall' vs 'Drywall' loses every wall."""
+        self.assertEqual(ux.WALL_VARIANTS["concrete"][0], "Concrete")
+        self.assertEqual(ux.WALL_VARIANTS["drywall"][0], "Dry wall")
+        self.assertEqual(ux.WALL_VARIANTS["brick"][0], "Brick wall")
+        self.assertEqual(ux.WALL_VARIANTS["door_wood"][0], "Door Interior")
+        self.assertEqual(ux.WALL_VARIANTS["door_metal"][0], "Metal door / wall")
+        self.assertEqual(ux.WALL_VARIANTS["window_1_pane"][0], "Exterior Window")
+
+    def test_a_real_export_round_trips_every_wall(self):
+        """The 122-wall plan that exposed this, as counts per label.
+
+        In: what Hamina wrote. Out: what we send back. Any label that changes
+        spelling is a wall Hamina will not recognise.
+        """
+        hamina_out = {"Concrete": 13, "Metal door / wall": 3, "Dry wall": 47,
+                      "Door Interior": 15, "Brick wall": 32,
+                      "Exterior Window": 12}
+        returned = {}
+        for label, n in hamina_out.items():
+            variant = wall_variant(label)
+            self.assertIn(variant, ux.WALL_VARIANTS,
+                          f"{label!r} has no InnerSpace variant to store it in")
+            back = ux.WALL_VARIANTS[variant][0]
+            returned[back] = returned.get(back, 0) + n
+        self.assertEqual(returned, hamina_out,
+                         "every wall must come back under the label it went in "
+                         "with, or Hamina drops it")
 
     def test_shared_labels_invert_to_the_first_variant(self):
         """Hamina draws no distinction between window pane counts, so all three
         pane variants share a label. The inverse must still be deterministic
         and land on the single-pane variant."""
-        self.assertEqual(WALL_LABEL_TO_VARIANT["Window"], "window_1_pane")
+        self.assertEqual(WALL_LABEL_TO_VARIANT["Exterior Window"],
+                         "window_1_pane")
         for label in {lbl for lbl, _ in ux.WALL_VARIANTS.values()}:
             self.assertIn(label, WALL_LABEL_TO_VARIANT,
                           f"{label!r} missing from the inverse")
@@ -97,7 +146,7 @@ class WallVocabulary(unittest.TestCase):
     def test_hamina_types_survive_the_round_trip(self):
         """Hamina -> InnerSpace variant -> back out returns the same label,
         except where InnerSpace has no variant to store the material in."""
-        for wall_type in sorted(HAMINA_WALL_TYPES):
+        for wall_type in sorted(HAMINA_EXPORT_WALL_TYPES):
             variant = wall_variant(wall_type)
             if variant not in ux.WALL_VARIANTS:
                 continue        # Cubicle/Elevator are attenuation objects
@@ -140,8 +189,10 @@ class CustomWallTypes(unittest.TestCase):
         self.assertEqual(label, "Wall")
 
     def test_builtin_variant_still_uses_the_table(self):
+        """A built-in variant takes its label from the table, not the project's
+        wall-type names — and the table now spells them Hamina's way."""
         self.assertEqual(_wall_label({"variant": "door_wood"}, self.TYPES),
-                         "Door (Wooden)")
+                         "Door Interior")
 
 
 def _dev(stats, table=None, **kw):

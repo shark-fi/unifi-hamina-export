@@ -26,7 +26,7 @@ import unifi_export as ux
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
-    _synth_mac, _is_placeholder_mac, run_purge,
+    _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
 )
 
 
@@ -792,3 +792,57 @@ class PlaceholderCountReporting(unittest.TestCase):
                {"name": "AP2", "mac_synth": True}]
         n_synth, n_dev = self.count(aps, {"AP1", "AP2"})
         self.assertEqual((n_synth, n_dev), (1, 2))
+
+
+class SharedRemovableRule(unittest.TestCase):
+    """The audit and the purge must describe one project identically.
+
+    They once reported 8 device shapes and 5 for the same console, which read
+    as a filtering bug in one of them. It was neither: the project changed
+    between the runs. The rule now lives in one function both import, so that
+    explanation is the ONLY one left when the numbers differ.
+    """
+
+    PLANS = [{"id": "P1", "title": "Downstairs"}, {"id": "P2", "title": "Upstairs"}]
+
+    @staticmethod
+    def dev(title, mac, plan):
+        return {"type": "device", "title": title, "planId": plan,
+                "meta": {"mac": mac}}
+
+    def classify(self, shapes):
+        return classify_device_shapes({"plans": self.PLANS, "shapes": shapes})
+
+    def test_a_stranded_copy_of_a_placed_device_is_removable(self):
+        rem, kept, total = self.classify([
+            self.dev("AP", "A89C6C2AAA7D", None),
+            self.dev("AP", "A89C6C2AAA7D", "P2")])
+        self.assertEqual((len(rem), len(kept), total), (1, 1, 2))
+        self.assertEqual(rem[0][1], "duplicate of a placed device")
+        self.assertIsNone(rem[0][0]["planId"], "must remove the plan-less copy")
+
+    def test_a_placeholder_is_removable_even_when_placed(self):
+        rem, _kept, _t = self.classify([self.dev("X", "7EACFC138E98", "P1")])
+        self.assertEqual([w for _s, w in rem], ["placeholder"])
+
+    def test_a_device_listed_once_is_never_removable(self):
+        rem, kept, _t = self.classify([
+            self.dev("Only copy", "A89C6C2AA992", "P1"),
+            self.dev("Unplaced, no twin", "A89C6CA05806", None)])
+        self.assertEqual((len(rem), len(kept)), (0, 2))
+
+    def test_the_totals_always_reconcile(self):
+        """removable + kept == total, whatever the input."""
+        for shapes in ([], [self.dev("a", "A89C6C2AAA7D", None)],
+                       [self.dev("a", "7E00000000AA", "P1"),
+                        self.dev("b", "A89C6C2AA992", "P2"),
+                        self.dev("b", "A89C6C2AA992", None)]):
+            rem, kept, total = self.classify(shapes)
+            self.assertEqual(len(rem) + len(kept), total)
+
+    def test_non_device_shapes_are_not_counted(self):
+        rem, kept, total = self.classify([
+            {"type": "wall", "planId": "P1"}, {"type": "scale", "planId": "P1"},
+            self.dev("AP", "A89C6C2AA992", "P1")])
+        self.assertEqual(total, 1, "walls and scale lines are not devices")
+        self.assertEqual((len(rem), len(kept)), (0, 1))

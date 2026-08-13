@@ -1069,12 +1069,13 @@ def run(args):
                       % ", ".join(sorted(atten_misses)))
             w.shape_create(attens)
 
-        devices = []
+        devices, placed_aps = [], []
         for ap in fp["aps"]:
             pid = find_product_id(ap, products)
             if not pid:
                 skipped.append("%s (%s)" % (ap["name"], ap["model_original"]))
                 continue
+            placed_aps.append(ap)
             devices.append(device_shape(
                 plan_id, proj_id, ap, pid,
                 to_scene(ap["x"], ap["y"], fp["img_w"], fp["img_h"])))
@@ -1094,7 +1095,13 @@ def run(args):
                 w.shape_remove(stale)
                 freed = {s["id"] for s in stale}
         if devices:
-            n_synth = sum(1 for ap in fp["aps"] if ap.get("mac_synth"))
+            # Count over the APs actually being created, not everything parsed
+            # for this plan: an AP skipped for having no product match still had
+            # a placeholder MAC synthesized, so counting those reported more
+            # placeholders than devices — "2 AP(s) (3 with synthesized
+            # placeholder MAC)" — which is impossible on its face, in the output
+            # someone is reading to decide whether to --commit.
+            n_synth = sum(1 for ap in placed_aps if ap.get("mac_synth"))
             print("  devices: %d AP(s)%s" % (
                 len(devices),
                 " (%d with synthesized placeholder MAC)" % n_synth if n_synth else ""))

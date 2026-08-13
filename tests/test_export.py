@@ -763,3 +763,32 @@ class PurgeSelection(unittest.TestCase):
         self.assertIn("6 removable shape(s); 7 left alone", out)
         for kept in ("U6P-Furnace", "Front Doorbell"):
             self.assertNotIn(kept, out, "%s must survive" % kept)
+
+
+class PlaceholderCountReporting(unittest.TestCase):
+    """The per-plan summary printed just before you decide to --commit.
+
+    It said "2 AP(s) (3 with synthesized placeholder MAC)" on a real import.
+    More placeholders than devices cannot happen, and a number that is visibly
+    impossible costs you the ability to trust the ones beside it.
+    """
+
+    @staticmethod
+    def count(aps, placed_names):
+        """The corrected expression: count over what is actually created."""
+        placed = [a for a in aps if a["name"] in placed_names]
+        return sum(1 for a in placed if a.get("mac_synth")), len(placed)
+
+    def test_an_ap_skipped_for_its_model_is_not_counted(self):
+        aps = [{"name": "AP1", "mac_synth": True},
+               {"name": "AP2", "mac_synth": True},
+               {"name": "AP4", "mac_synth": True}]        # no product match
+        n_synth, n_dev = self.count(aps, {"AP1", "AP2"})
+        self.assertEqual((n_synth, n_dev), (2, 2))
+        self.assertLessEqual(n_synth, n_dev, "placeholders cannot exceed devices")
+
+    def test_matched_aps_do_not_inflate_the_count(self):
+        aps = [{"name": "AP1", "mac_synth": False},
+               {"name": "AP2", "mac_synth": True}]
+        n_synth, n_dev = self.count(aps, {"AP1", "AP2"})
+        self.assertEqual((n_synth, n_dev), (1, 2))

@@ -39,37 +39,37 @@ def oi_sidecar(sidecar, floorplans):
             json.dump(sidecar, f)
         return load_obstacle_sidecar(p, floorplans)
 
-# The wall_type strings Hamina WRITES in its own OpenIntent export, read out of
-# a real one. Hamina drops a segment whose wall_type it does not recognise, and
-# it matches on these -- not on the display names in its wall-type picker.
+# WALL TYPE NAMES ARE PER-PROJECT. Two real Hamina exports disagree completely,
+# and both are correct for their own project — so no fixed table can serve both.
 #
-# This set used to be the picker names, and this file asserted against them. It
-# passed while the exporter shipped labels Hamina rejected: a 122-wall plan
-# round-tripped and came back with 13, the only ones whose picker name and
-# library name happen to be identical ("Concrete"). A green suite proved
-# consistency with a list nobody had checked against the product.
-#
-# Add a name here only from an export that contains it.
-HAMINA_EXPORT_WALL_TYPES = {
-    "Brick wall", "Concrete", "Door Interior", "Dry wall", "Exterior Window",
-    "Metal door / wall",
+# From an export of a project CREATED IN HAMINA (its default library):
+HAMINA_DEFAULT_WALL_TYPES = {
+    "Brick", "Concrete", "Cubicle", "Door (Glass)", "Door (Metal)",
+    "Door (Wooden)", "Drywall", "Drywall (Heavy)", "Elevator", "Glass",
+    "Glass (Thin)", "Metal", "Window", "Window (Tinted)", "Wood",
 }
-# Labels the exporter emits that no Hamina export has been seen to contain.
-# They came from the picker, which is exactly the source that proved wrong for
-# the six above, so each is a wall Hamina may silently drop.
-UNVERIFIED_LABELS = {
-    "Drywall (Heavy)", "Glass", "Glass (Thin)", "Metal", "Wood", "Door (Glass)",
+# From the NUES project, whose library was renamed or came from another tool.
+# Its export also carried a user-defined "Custom material", which is the proof
+# that these names are project data, not a fixed vocabulary.
+NUES_PROJECT_WALL_TYPES = {
+    "Concrete", "Dry wall", "Brick wall", "Door Interior",
+    "Metal door / wall", "Exterior Window",
 }
+# History worth keeping: the exporter first emitted the default names, which
+# lost 109 of 122 walls importing into NUES. The fix swapped the table to NUES's
+# names, which would lose every wall in any normally-created project. Both were
+# the same mistake — believing one project's library was Hamina's vocabulary.
+
 # Hamina types with no built-in InnerSpace variant to store them in. A wall
 # drawn as a *custom* InnerSpace type keeps its name and round-trips exactly
 # (see CustomWallTypes); one mapped onto a built-in on the way in can only come
 # back as that built-in. Cubicle and Elevator are attenuation objects in
 # InnerSpace rather than walls, so they land on the nearest wall material.
 DEGRADES_TO = {
-    "Railing": "Dry wall",
-    "Cubicle": "Dry wall",
+    "Railing": "Drywall",
+    "Cubicle": "Drywall",
     "Elevator": "Metal",
-    "Window (Tinted)": "Exterior Window",
+    "Window (Tinted)": "Window",
 }
 
 
@@ -91,70 +91,50 @@ class WallVocabulary(unittest.TestCase):
                              f"{variant!r} exports as {label!r}, which looks "
                              f"like the .title() fallback, not a Hamina type")
 
-    def test_every_label_is_confirmed_or_declared_unverified(self):
-        """A label is either seen in a Hamina export or flagged as a guess.
-
-        The failure this guards is not a typo -- it is confidence. The previous
-        version of this test asserted against Hamina's PICKER names and passed
-        while the exporter dropped 109 of 122 walls on a real plan.
-        """
+    def test_every_label_we_emit_is_in_hamina_s_default_library(self):
+        """Our table is the default library, because that is what a project
+        created in Hamina has. A project with a renamed library needs the label
+        preserved instead, which is a different fix."""
         for variant, (label, _att) in ux.WALL_VARIANTS.items():
-            self.assertIn(
-                label, HAMINA_EXPORT_WALL_TYPES | UNVERIFIED_LABELS,
-                f"{variant!r} exports as {label!r}, which is neither confirmed "
-                f"from a Hamina export nor declared unverified. Read the label "
-                f"out of an export before adding it.")
+            self.assertIn(label, HAMINA_DEFAULT_WALL_TYPES,
+                          f"{variant!r} exports as {label!r}, absent from an "
+                          f"export of a Hamina-created project")
 
-    def test_the_six_confirmed_labels_are_exactly_what_hamina_emits(self):
-        """Byte-for-byte, because 'Dry wall' vs 'Drywall' loses every wall."""
-        self.assertEqual(ux.WALL_VARIANTS["concrete"][0], "Concrete")
-        self.assertEqual(ux.WALL_VARIANTS["drywall"][0], "Dry wall")
-        self.assertEqual(ux.WALL_VARIANTS["brick"][0], "Brick wall")
-        self.assertEqual(ux.WALL_VARIANTS["door_wood"][0], "Door Interior")
-        self.assertEqual(ux.WALL_VARIANTS["door_metal"][0], "Metal door / wall")
-        self.assertEqual(ux.WALL_VARIANTS["window_1_pane"][0], "Exterior Window")
+    def test_both_vocabularies_import_to_the_same_variant(self):
+        """Reading has no such constraint, so it must accept either spelling."""
+        for a, b in (("Drywall", "Dry wall"), ("Brick", "Brick wall"),
+                     ("Door (Wooden)", "Door Interior"),
+                     ("Door (Metal)", "Metal door / wall"),
+                     ("Window", "Exterior Window")):
+            self.assertEqual(wall_variant(a), wall_variant(b),
+                             f"{a!r} and {b!r} are the same material")
 
-    def test_a_real_export_round_trips_every_wall(self):
-        """The 122-wall plan that exposed this, as counts per label.
+    def test_a_default_library_export_round_trips_every_wall(self):
+        """The 16-type test plan: in and back out under the same names."""
+        for label in sorted(HAMINA_DEFAULT_WALL_TYPES):
+            variant = wall_variant(label)
+            if variant not in ux.WALL_VARIANTS:
+                continue                      # Cubicle/Elevator: see DEGRADES_TO
+            back = ux.WALL_VARIANTS[variant][0]
+            self.assertEqual(back, DEGRADES_TO.get(label, label),
+                             f"{label!r} returned as {back!r}")
 
-        In: what Hamina wrote. Out: what we send back. Any label that changes
-        spelling is a wall Hamina will not recognise.
+    def test_a_renamed_library_survives_import_but_not_the_return_trip(self):
+        """The known gap, asserted rather than left implicit.
+
+        NUES's walls import correctly — the material is right — but they come
+        back under the default names, which that project does not recognise.
+        Only preserving the incoming label fixes this; no table can.
         """
-        hamina_out = {"Concrete": 13, "Metal door / wall": 3, "Dry wall": 47,
-                      "Door Interior": 15, "Brick wall": 32,
-                      "Exterior Window": 12}
-        returned = {}
-        for label, n in hamina_out.items():
+        for label in sorted(NUES_PROJECT_WALL_TYPES):
             variant = wall_variant(label)
             self.assertIn(variant, ux.WALL_VARIANTS,
-                          f"{label!r} has no InnerSpace variant to store it in")
+                          f"{label!r} must at least import to a real material")
             back = ux.WALL_VARIANTS[variant][0]
-            returned[back] = returned.get(back, 0) + n
-        self.assertEqual(returned, hamina_out,
-                         "every wall must come back under the label it went in "
-                         "with, or Hamina drops it")
-
-    def test_shared_labels_invert_to_the_first_variant(self):
-        """Hamina draws no distinction between window pane counts, so all three
-        pane variants share a label. The inverse must still be deterministic
-        and land on the single-pane variant."""
-        self.assertEqual(WALL_LABEL_TO_VARIANT["Exterior Window"],
-                         "window_1_pane")
-        for label in {lbl for lbl, _ in ux.WALL_VARIANTS.values()}:
-            self.assertIn(label, WALL_LABEL_TO_VARIANT,
-                          f"{label!r} missing from the inverse")
-
-    def test_hamina_types_survive_the_round_trip(self):
-        """Hamina -> InnerSpace variant -> back out returns the same label,
-        except where InnerSpace has no variant to store the material in."""
-        for wall_type in sorted(HAMINA_EXPORT_WALL_TYPES):
-            variant = wall_variant(wall_type)
-            if variant not in ux.WALL_VARIANTS:
-                continue        # Cubicle/Elevator are attenuation objects
-            back = ux.WALL_VARIANTS[variant][0]
-            expected = DEGRADES_TO.get(wall_type, wall_type)
-            self.assertEqual(back, expected,
-                             f"{wall_type!r} returned as {back!r}")
+            if label != "Concrete":           # the one name common to both
+                self.assertNotEqual(back, label,
+                                    "if this now round-trips, the preservation "
+                                    "fix landed and this test should go")
 
 
 def _wall_label(shape, wall_types):
@@ -191,9 +171,9 @@ class CustomWallTypes(unittest.TestCase):
 
     def test_builtin_variant_still_uses_the_table(self):
         """A built-in variant takes its label from the table, not the project's
-        wall-type names — and the table now spells them Hamina's way."""
+        own wall-type names."""
         self.assertEqual(_wall_label({"variant": "door_wood"}, self.TYPES),
-                         "Door Interior")
+                         "Door (Wooden)")
 
 
 def _dev(stats, table=None, **kw):
@@ -925,8 +905,8 @@ class WallLabelVerification(unittest.TestCase):
         self.assertEqual(dict(counts), {"Dry wall": 2, "Concrete": 1})
 
     def test_a_label_we_emit_is_confirmed(self):
-        confirmed, theirs, _unver = wl.classify({"Dry wall": 3, "Concrete": 1})
-        self.assertEqual(confirmed, ["Concrete", "Dry wall"])
+        confirmed, theirs, _unver = wl.classify({"Drywall": 3, "Concrete": 1})
+        self.assertEqual(confirmed, ["Concrete", "Drywall"])
         self.assertEqual(theirs, [])
 
     def test_a_hamina_label_we_never_emit_is_flagged(self):
@@ -939,13 +919,14 @@ class WallLabelVerification(unittest.TestCase):
         self.assertIn("Glass", unverified)
         self.assertNotIn("Concrete", unverified)
 
-    def test_the_picker_name_and_the_export_name_do_not_both_pass(self):
-        """The whole failure, in one assertion.
+    def test_a_renamed_library_shows_up_as_theirs_not_confirmed(self):
+        """How a project with its own vocabulary announces itself.
 
-        'Drywall' is what the picker shows and what we used to emit; 'Dry wall'
-        is what Hamina writes. Feeding an export containing the real one must
-        not mark the old spelling confirmed.
+        Feed it the NUES export and every label lands in THEIRS — which is the
+        signal that this project will not accept what we emit, and that the
+        labels need preserving rather than translating.
         """
-        confirmed, _t, unverified = wl.classify({"Dry wall": 47})
-        self.assertIn("Dry wall", confirmed)
-        self.assertNotIn("Drywall", confirmed)
+        confirmed, theirs, _unver = wl.classify(
+            {"Dry wall": 47, "Brick wall": 32, "Concrete": 13})
+        self.assertEqual(confirmed, ["Concrete"])
+        self.assertEqual(theirs, ["Brick wall", "Dry wall"])

@@ -466,51 +466,47 @@ INNERSPACE_SKU_ALIASES = {
 # Hamina, into InnerSpace and back, 86 walls (40%) returned under a label
 # Hamina had never sent, and vanished on import.
 #
-# The labels below are the ones HAMINA ITSELF WRITES in its OpenIntent export,
-# read out of a real export rather than off a menu. That distinction cost a
-# round trip: an earlier version used the names from Hamina's wall-type PICKER
-# ("Drywall", "Door (Metal)", "Brick") and asserted in this comment that they
-# were verified. They are real names -- they are just the display names, and the
-# importer matches on the library names its exporter emits. Sending "Drywall"
-# for a wall Hamina calls "Dry wall" is an unrecognised type, so it dropped
-# every wall except the one label that happened to be spelled identically
-# ("Concrete"): 109 of 122 gone, silently.
+# WALL TYPE NAMES ARE PER-PROJECT. Hamina drops any wall_type it does not
+# recognise, and what it recognises is the wall-type library of the project you
+# import into — which differs between projects.
 #
-# Verify a label the only way that proves anything: export a plan containing it
-# from Hamina and read the wall_type strings out of the zip.
-#     python3 -c "import zipfile,json,sys;z=zipfile.ZipFile(sys.argv[1]); \
-#       print({w['wall_type'] for n in z.namelist() if n.endswith('.json') \
-#       for f in json.loads(z.read(n)).get('floorplans',[]) \
-#       for w in f.get('wall_segments',[])})" export.zip
+# Two real exports, both from Hamina, disagree completely:
 #
-# CONFIRMED from a real Hamina export: Brick wall, Concrete, Door Interior,
-# Dry wall, Exterior Window, Metal door / wall.
-# UNCONFIRMED (no Hamina export seen containing them): every other entry below.
-# They came from the same picker the confirmed ones did, so treat them as
-# suspect until an export proves otherwise.
+#   a project created in Hamina   Drywall   Brick        Door (Wooden)
+#   the NUES project              Dry wall  Brick wall   Door Interior
 #
-# Hamina has no double- or triple-pane window, so all three InnerSpace pane
-# variants collapse onto "Exterior Window": one pane of information is worth
-# losing, a dropped wall is not. openintent_import.py inverts this table
-# first-wins, so "Exterior Window" comes back as window_1_pane.
+# The NUES project also contained "Metal door / wall" and "Exterior Window";
+# the other contained "Cubicle", "Elevator" and a user-defined "Custom
+# material". So no fixed table can be right for both, and picking one silently
+# loses every wall in the other kind of project.
+#
+# The labels below are Hamina's DEFAULT library, confirmed from an export of a
+# project created in Hamina. That is the right default because a project made
+# in Hamina has those names. It is NOT right for a project whose library was
+# renamed or came from another tool, and the real fix is to preserve whatever
+# label came in rather than normalising to any table at all — see issue.
+#
+# Verify against an export, never off the picker:
+#     python3 wall_labels.py hamina-export.zip
+#
 WALL_VARIANTS = {
-    # confirmed against a real Hamina export
+    # all confirmed present in an export of a Hamina-created project
     "concrete": ("Concrete", 12.0),
-    "drywall": ("Dry wall", 3.0),
-    "brick": ("Brick wall", 10.0),
-    "door_wood": ("Door Interior", 3.0),
-    "door_metal": ("Metal door / wall", 15.0),
-    "window_1_pane": ("Exterior Window", 3.0),
-    # unconfirmed — picker display names, which is what the confirmed six
-    # turned out NOT to be. Each is a wall Hamina will drop if it is wrong.
+    "drywall": ("Drywall", 3.0),
     "drywall_heavy": ("Drywall (Heavy)", 5.0),
     "glass": ("Glass", 6.0),
     "glass_thin": ("Glass (Thin)", 3.0),
+    "brick": ("Brick", 10.0),
     "metal": ("Metal", 20.0),
     "wood": ("Wood", 4.0),
+    "door_wood": ("Door (Wooden)", 3.0),
+    "door_metal": ("Door (Metal)", 15.0),
     "door_glass": ("Door (Glass)", 6.0),
-    "window_2_pane": ("Exterior Window", 5.0),
-    "window_3_pane": ("Exterior Window", 7.0),
+    # Hamina has no pane count, so all three collapse onto "Window": one pane of
+    # information is worth losing, a dropped wall is not.
+    "window_1_pane": ("Window", 3.0),
+    "window_2_pane": ("Window", 5.0),
+    "window_3_pane": ("Window", 7.0),
 }
 
 

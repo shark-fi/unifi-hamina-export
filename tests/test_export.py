@@ -23,6 +23,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unifi_export as ux
+import wall_labels as wl
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
@@ -897,3 +898,54 @@ class SharedRemovableRule(unittest.TestCase):
             self.dev("AP", "A89C6C2AA992", "P1")])
         self.assertEqual(total, 1, "walls and scale lines are not devices")
         self.assertEqual((len(rem), len(kept)), (0, 1))
+
+
+class WallLabelVerification(unittest.TestCase):
+    """Classifying an export's wall labels against the ones we emit.
+
+    The point of the tool is to stop anyone adding a label from Hamina's picker
+    again, so the test that matters is that a picker-name and an export-name for
+    the same material land in different buckets.
+    """
+
+    @staticmethod
+    def zip_with(labels):
+        import io
+        buf = io.BytesIO()
+        segs = [{"wall_type": l, "start_point": {"x": 0, "y": 0},
+                 "end_point": {"x": 1, "y": 1}} for l in labels]
+        with zipfile.ZipFile(buf, "w") as z:
+            z.writestr("openintent.json",
+                       json.dumps({"floorplans": [{"name": "F", "wall_segments": segs}]}))
+        buf.seek(0)
+        return buf
+
+    def test_labels_are_counted_wherever_they_sit_in_the_document(self):
+        counts = wl.labels_in(self.zip_with(["Dry wall", "Dry wall", "Concrete"]))
+        self.assertEqual(dict(counts), {"Dry wall": 2, "Concrete": 1})
+
+    def test_a_label_we_emit_is_confirmed(self):
+        confirmed, theirs, _unver = wl.classify({"Dry wall": 3, "Concrete": 1})
+        self.assertEqual(confirmed, ["Concrete", "Dry wall"])
+        self.assertEqual(theirs, [])
+
+    def test_a_hamina_label_we_never_emit_is_flagged(self):
+        """A material that survives the trip but comes back as something else."""
+        _c, theirs, _u = wl.classify({"Elevator": 2})
+        self.assertEqual(theirs, ["Elevator"])
+
+    def test_our_unseen_labels_are_reported_as_still_guesses(self):
+        _c, _t, unverified = wl.classify({"Concrete": 1})
+        self.assertIn("Glass", unverified)
+        self.assertNotIn("Concrete", unverified)
+
+    def test_the_picker_name_and_the_export_name_do_not_both_pass(self):
+        """The whole failure, in one assertion.
+
+        'Drywall' is what the picker shows and what we used to emit; 'Dry wall'
+        is what Hamina writes. Feeding an export containing the real one must
+        not mark the old spelling confirmed.
+        """
+        confirmed, _t, unverified = wl.classify({"Dry wall": 47})
+        self.assertIn("Dry wall", confirmed)
+        self.assertNotIn("Drywall", confirmed)

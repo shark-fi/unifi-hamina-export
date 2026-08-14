@@ -79,6 +79,12 @@ INNERSPACE_WALL_VARIANTS = {
 # Common OpenIntent/Hamina wall-material phrasings -> InnerSpace variant. Keys are
 # normalized (lowercase, non-alphanumeric collapsed to single spaces).
 _WALL_ALIASES = {
+    # Names seen in a real project whose library was NOT Hamina's default (the
+    # NUES export). Without these they fall through to the drywall default with
+    # a warning — right by luck for one of them, wrong for the rest.
+    "dry wall": "drywall", "brick wall": "brick", "door interior": "door_wood",
+    "metal door / wall": "door_metal", "metal door/wall": "door_metal",
+    "exterior window": "window_1_pane", "interior window": "window_1_pane",
     "concrete": "concrete", "cinder block": "concrete", "cinderblock": "concrete",
     "cmu": "concrete", "solid wall": "concrete",
     "fireplace": "brick", "chimney": "brick", "masonry": "brick", "stone": "brick",

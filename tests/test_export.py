@@ -28,6 +28,7 @@ from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
+    needs_own_wall_type, wall_type_shape, wall_shape,
 )
 
 
@@ -119,22 +120,21 @@ class WallVocabulary(unittest.TestCase):
             self.assertEqual(back, DEGRADES_TO.get(label, label),
                              f"{label!r} returned as {back!r}")
 
-    def test_a_renamed_library_survives_import_but_not_the_return_trip(self):
-        """The known gap, asserted rather than left implicit.
+    def test_a_renamed_library_is_preserved_rather_than_normalised(self):
+        """This used to assert the gap; the gap is closed.
 
-        NUES's walls import correctly — the material is right — but they come
-        back under the default names, which that project does not recognise.
-        Only preserving the incoming label fixes this; no table can.
+        A label the table would change is written as the project's own wall
+        type instead, so it comes back exactly as it went in.
         """
         for label in sorted(NUES_PROJECT_WALL_TYPES):
             variant = wall_variant(label)
             self.assertIn(variant, ux.WALL_VARIANTS,
-                          f"{label!r} must at least import to a real material")
-            back = ux.WALL_VARIANTS[variant][0]
-            if label != "Concrete":           # the one name common to both
-                self.assertNotEqual(back, label,
-                                    "if this now round-trips, the preservation "
-                                    "fix landed and this test should go")
+                          f"{label!r} must import to a real material")
+            if label == "Concrete":           # the one name common to both
+                self.assertFalse(needs_own_wall_type(label, variant))
+            else:
+                self.assertTrue(needs_own_wall_type(label, variant),
+                                f"{label!r} must be preserved, not normalised")
 
 
 def _wall_label(shape, wall_types):
@@ -930,3 +930,80 @@ class WallLabelVerification(unittest.TestCase):
             {"Dry wall": 47, "Brick wall": 32, "Concrete": 13})
         self.assertEqual(confirmed, ["Concrete"])
         self.assertEqual(theirs, ["Brick wall", "Dry wall"])
+
+
+class PreservedWallLabels(unittest.TestCase):
+    """Carrying a project's own wall-type names through InnerSpace.
+
+    Wall type names are the importing project's library. Normalising "Dry wall"
+    to "Drywall" hands a project back a name it does not recognise, and Hamina
+    drops what it does not recognise — 109 of 122 walls, in the case that
+    prompted this. No table fixes that; only preserving the incoming string.
+    """
+
+    def test_a_label_we_would_emit_anyway_uses_the_builtin_variant(self):
+        """InnerSpace knows its own materials; do not replace them needlessly."""
+        for label, variant in (("Drywall", "drywall"), ("Brick", "brick"),
+                               ("Window", "window_1_pane")):
+            self.assertFalse(needs_own_wall_type(label, variant),
+                             f"{label!r} round-trips already")
+
+    def test_a_renamed_label_needs_its_own_type(self):
+        for label, variant in (("Dry wall", "drywall"), ("Brick wall", "brick"),
+                               ("Door Interior", "door_wood"),
+                               ("Metal door / wall", "door_metal"),
+                               ("Exterior Window", "window_1_pane")):
+            self.assertTrue(needs_own_wall_type(label, variant),
+                            f"{label!r} would come back as something else")
+
+    def test_a_user_defined_material_is_preserved(self):
+        """'Custom material' was in a real export — arbitrary names exist."""
+        self.assertTrue(needs_own_wall_type("Custom material", "drywall"))
+
+    def test_nothing_is_preserved_for_an_empty_or_unknown_label(self):
+        self.assertFalse(needs_own_wall_type("", "drywall"))
+        self.assertFalse(needs_own_wall_type("Anything", "no_such_variant"))
+
+    def test_the_wall_type_is_cloned_from_one_the_project_has(self):
+        """The write API is undocumented; copy a real object, do not invent it."""
+        template = {"id": "old", "projectId": "p", "name": "Existing",
+                    "attenuation": 3.0, "colour": "#abc", "someFlag": True}
+        wt = wall_type_shape("proj-1", "Dry wall", 3.0, template)
+        self.assertEqual(wt["name"], "Dry wall")
+        self.assertEqual(wt["projectId"], "proj-1")
+        self.assertNotEqual(wt["id"], "old")
+        self.assertEqual(wt["colour"], "#abc", "unknown fields must carry over")
+        self.assertTrue(wt["someFlag"])
+
+    def test_an_attenuation_field_is_only_set_if_the_template_has_one(self):
+        """Its name varies; inventing one risks the call being rejected."""
+        self.assertEqual(wall_type_shape("p", "X", 12.0,
+                                         {"attenuationDb": 1})["attenuationDb"], 12.0)
+        bare = wall_type_shape("p", "X", 12.0, {"name": "n"})
+        self.assertNotIn("attenuation", bare)
+
+    def test_a_wall_pointing_at_a_type_is_marked_custom(self):
+        """That pairing is what the exporter reads the name back from."""
+        sh = wall_shape("plan", "proj", "custom", (0, 0), (1, 1), wall_type_id="wt-1")
+        self.assertEqual(sh["variant"], "custom")
+        self.assertEqual(sh["wallTypeId"], "wt-1")
+
+    def test_a_builtin_wall_carries_no_wall_type_id(self):
+        sh = wall_shape("plan", "proj", "drywall", (0, 0), (1, 1))
+        self.assertNotIn("wallTypeId", sh)
+
+    def test_the_round_trip_now_returns_the_original_name(self):
+        """End to end, against the labels that were being lost.
+
+        Import creates a type named exactly as it arrived; the exporter reads a
+        custom wall's name from the project's wallTypes, so it comes back
+        unchanged — whatever the project calls it.
+        """
+        for label in ("Dry wall", "Brick wall", "Door Interior",
+                      "Metal door / wall", "Exterior Window", "Custom material"):
+            variant = wall_variant(label)
+            self.assertTrue(needs_own_wall_type(label, variant))
+            wt = wall_type_shape("p", label, 3.0, {"name": "t"})
+            shape = wall_shape("plan", "p", "custom", (0, 0), (1, 1), wt["id"])
+            back = _wall_label(shape, {wt["id"]: wt})
+            self.assertEqual(back, label, f"{label!r} returned as {back!r}")

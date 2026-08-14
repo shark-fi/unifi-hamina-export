@@ -622,13 +622,55 @@ def scale_shape(plan_id, project_id, img_w, width_m, ceiling_m):
     }
 
 
-def wall_shape(plan_id, project_id, variant, a, b):
-    return {
+def wall_shape(plan_id, project_id, variant, a, b, wall_type_id=None):
+    shape = {
         "id": str(uuid.uuid4()), "planId": plan_id, "projectId": project_id,
         "type": "wall", "variant": variant, "status": 0,
         "position": [{"x": a[0], "y": a[1], "z": 0}, {"x": b[0], "y": b[1], "z": 0}],
         "createdAt": _ISO, "updatedAt": _ISO,
     }
+    if wall_type_id:
+        # A custom wall carries its real name in the project's wallTypes; the
+        # exporter reads it from there, which is how a label survives verbatim.
+        shape["wallTypeId"] = wall_type_id
+    return shape
+
+
+def wall_type_shape(project_id, name, attenuation, template=None):
+    """A project wall type named exactly as the source called it.
+
+    Fields are cloned from one the project already has, rather than invented.
+    This is an undocumented write API and the object's required fields are not
+    published; copying a real one and substituting id/name is the difference
+    between adapting to whatever the console expects and guessing at it.
+    """
+    shape = dict(template or {})
+    shape.update({
+        "id": str(uuid.uuid4()), "projectId": project_id, "name": name,
+        "createdAt": _ISO, "updatedAt": _ISO,
+    })
+    # Only set attenuation if the template has such a field — the name varies
+    # and inventing one risks rejection of the whole call.
+    for key in ("attenuation", "attenuationDb", "loss", "value"):
+        if template and key in template:
+            shape[key] = attenuation
+            break
+    return shape
+
+
+def needs_own_wall_type(label, variant):
+    """True when normalising this label would lose it.
+
+    Wall type names are the PROJECT's library, not a fixed vocabulary: a plan
+    from a project calling drywall "Dry wall" comes back as "Drywall", which
+    that project does not recognise and silently drops. When the incoming label
+    is what we would emit anyway, the built-in variant is better — InnerSpace
+    knows the material. When it is not, the name has to be carried.
+    """
+    if not label or not variant:
+        return False
+    known = WALL_VARIANTS.get(variant)
+    return bool(known) and label.strip() != known[0]
 
 
 def device_shape(plan_id, project_id, ap, product_id, scene):
@@ -719,6 +761,14 @@ class Writer:
             return "<new-plan-id>", "<project-id>"
         plan = resp.get("data", {}).get("plan", {})
         return plan.get("id"), plan.get("projectId")
+
+    def wall_type_create(self, shapes):
+        """POST /project/wall-type, one call per type. Returns name -> id."""
+        out = {}
+        for sh in shapes:
+            self.call("POST", "/project/wall-type", sh)
+            out[sh["name"]] = sh["id"]
+        return out
 
     def shape_create(self, shapes):
         return self.call("POST", "/shape/change",
@@ -828,7 +878,15 @@ def load_catalog(args, http_, base):
     for s in data.get("shapes") or []:
         if s.get("planId"):
             shapes_by_plan[s["planId"]].append(s)
-    return pid, products, name_to_mac, plans_by_title, dict(shapes_by_plan)
+    # Existing wall types, by lowercased name. Two uses: reuse a type the
+    # project already has rather than creating a duplicate every import, and
+    # serve as the template for any we do create, so no field is invented.
+    wall_types = {}
+    for wt in data.get("wallTypes") or []:
+        if wt.get("name"):
+            wall_types[wt["name"].strip().lower()] = wt
+    return (pid, products, name_to_mac, plans_by_title, dict(shapes_by_plan),
+            wall_types)
 
 
 def _plan_title(override, name, limit=32):
@@ -999,8 +1057,8 @@ def run(args):
         legacy_login(http_, base, args.username, pw)
         csrf = apply_csrf(http_)
         print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
-    project_id, products, name_to_mac, plans_by_title, shapes_by_plan = load_catalog(
-        args, http_, base)
+    (project_id, products, name_to_mac, plans_by_title, shapes_by_plan,
+     wall_types) = load_catalog(args, http_, base)
     print("catalog: %d product(s), %d adopted device MAC(s); projectId=%s"
           % (len(products), len(name_to_mac), project_id))
     replace = not args.no_replace
@@ -1064,13 +1122,38 @@ def run(args):
         wall_misses: set = set()
         mat_counts: dict = {}
         walls = []
+        # Labels this project spells its own way. Creating a wall type named
+        # exactly as the source called it is what lets the export hand it back
+        # verbatim; normalising would return "Drywall" to a project that calls
+        # it "Dry wall", and Hamina drops what it does not recognise.
+        preserve: dict = {}
         for wl in fp["walls"]:
-            variant = wall_variant(wl["wall_type"], wall_misses)
+            label = (wl["wall_type"] or "").strip()
+            variant = wall_variant(label, wall_misses)
             mat_counts[variant] = mat_counts.get(variant, 0) + 1
+            if needs_own_wall_type(label, variant):
+                preserve.setdefault(label, variant)
+        for label, variant in sorted(preserve.items()):
+            existing = wall_types.get(label.lower())
+            if existing and existing.get("id"):
+                continue                       # the project already has it
+            template = next(iter(wall_types.values()), None)
+            wt = wall_type_shape(proj_id, label,
+                                 WALL_VARIANTS[variant][1], template)
+            created = w.wall_type_create([wt])
+            wall_types[label.lower()] = dict(wt)
+            print("  preserved wall type %r (%s) so it survives the round trip"
+                  % (label, variant))
+            del created
+        for wl in fp["walls"]:
+            label = (wl["wall_type"] or "").strip()
+            variant = wall_variant(label, set())
+            wt = wall_types.get(label.lower()) if label in preserve else None
             walls.append(wall_shape(
-                plan_id, proj_id, variant,
+                plan_id, proj_id, "custom" if wt else variant,
                 to_scene(*wl["start"], fp["img_w"], fp["img_h"]),
-                to_scene(*wl["end"], fp["img_w"], fp["img_h"])))
+                to_scene(*wl["end"], fp["img_w"], fp["img_h"]),
+                wall_type_id=(wt or {}).get("id")))
         if walls:
             print("  wall materials: " + ", ".join(
                 "%s×%d" % (v, n) for v, n in sorted(mat_counts.items())))

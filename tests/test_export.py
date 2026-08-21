@@ -1007,3 +1007,45 @@ class PreservedWallLabels(unittest.TestCase):
             shape = wall_shape("plan", "p", "custom", (0, 0), (1, 1), wt["id"])
             back = _wall_label(shape, {wt["id"]: wt})
             self.assertEqual(back, label, f"{label!r} returned as {back!r}")
+
+
+class NonJsonBody(unittest.TestCase):
+    """A 200 carrying HTML, which is how a console answers for an app it lacks.
+
+    A UniFi Express 7 has no InnerSpace, so the project endpoint returns a page
+    rather than JSON. json.loads turned that into "Expecting value: line 1
+    column 1 (char 0)" over a twenty-line traceback naming neither the URL nor
+    what came back — reported from a live host as an exporter crash.
+    """
+
+    URL = "https://10.10.5.1/proxy/innerspace/api/project?mode=2D"
+
+    def decode(self, payload, ctype="text/html"):
+        return ux.Http._decode_json(payload, 200, ctype, "GET", self.URL)
+
+    def test_html_says_the_app_is_probably_not_installed(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.decode(b"<!doctype html><html><body>Sign in</body></html>")
+        msg = str(cm.exception)
+        self.assertIn("not JSON", msg)
+        self.assertIn("not installed", msg)
+        self.assertIn(self.URL, msg, "name what was asked for")
+
+    def test_the_first_bytes_are_shown(self):
+        with self.assertRaises(RuntimeError) as cm:
+            self.decode(b"oops, not json here", ctype="text/plain")
+        self.assertIn("oops", str(cm.exception))
+
+    def test_plain_text_gets_no_html_guess(self):
+        """Only guess the cause when the shape supports it."""
+        with self.assertRaises(RuntimeError) as cm:
+            self.decode(b"upstream timeout", ctype="text/plain")
+        self.assertNotIn("not installed", str(cm.exception))
+
+    def test_an_empty_body_is_still_none_not_an_error(self):
+        self.assertIsNone(self.decode(b"", ctype=None))
+
+    def test_real_json_is_untouched(self):
+        self.assertEqual(self.decode(b'{"data": {"shapes": []}}',
+                                     ctype="application/json"),
+                         {"data": {"shapes": []}})

@@ -82,6 +82,27 @@ class Http:
         self.opener = urllib.request.build_opener(*handlers)
         self.extra_headers = {}
 
+    @staticmethod
+    def _decode_json(payload, status, ctype, method, url):
+        """Parse a body that is supposed to be JSON, or say what arrived.
+
+        A 200 carrying HTML is the normal way a console answers for an app that
+        is not installed, or for a session it does not accept — and json.loads
+        turns that into `Expecting value: line 1 column 1 (char 0)` over a
+        twenty-line traceback, which names neither the URL nor what came back.
+        """
+        try:
+            return json.loads(payload or b"null")
+        except ValueError:
+            head = " ".join(payload[:200].decode(errors="replace").split())
+            looks_html = head.lstrip().lower().startswith(("<!doctype", "<html", "<"))
+            hint = (" — an HTML page here usually means that app is not "
+                    "installed on this console, or the session is not valid "
+                    "for it" if looks_html else "")
+            raise RuntimeError(
+                f"{method} {url} -> HTTP {status} returned {ctype or 'no content-type'}, "
+                f"not JSON{hint}. First bytes: {head[:160]!r}") from None
+
     def request(self, method, url, body=None, headers=None, raw=False):
         h = {"Accept": "application/json", **self.extra_headers, **(headers or {})}
         data = None
@@ -94,7 +115,10 @@ class Http:
                 payload = resp.read()
                 if raw:
                     return resp.status, dict(resp.headers), payload
-                return resp.status, dict(resp.headers), json.loads(payload or b"null")
+                return (resp.status, dict(resp.headers),
+                        self._decode_json(payload, resp.status,
+                                          resp.headers.get("Content-Type"),
+                                          method, url))
         except urllib.error.HTTPError as e:
             detail = ""
             try:
@@ -511,7 +535,16 @@ WALL_VARIANTS = {
 
 
 def innerspace_project(http_, base):
-    body = http_.get_json(f"{base}{INNERSPACE_API}/project?mode=2D")
+    try:
+        body = http_.get_json(f"{base}{INNERSPACE_API}/project?mode=2D")
+    except RuntimeError as exc:
+        # Said here rather than in the HTTP layer because only the caller knows
+        # which app it was asking for.
+        raise RuntimeError(
+            f"{exc}\n  Floor plans live in the InnerSpace app. Check it is "
+            f"installed on this console and that the account has InnerSpace "
+            f"access — a Network-only admin reads APs fine and gets nothing "
+            f"here.") from None
     data = body.get("data") if isinstance(body, dict) else None
     if not data or "shapes" not in data:
         raise RuntimeError("unexpected InnerSpace project payload "

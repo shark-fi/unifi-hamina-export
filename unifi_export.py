@@ -1224,6 +1224,7 @@ UNIFI_MODEL_NAMES = {
     "U6M": "u6-mesh", "U6IW": "u6-iw", "U6ENT": "u6-enterprise",
     "U6EXT": "u6-extender",
     "U7PRO": "u7-pro", "U7PROMAX": "u7-pro-max",
+    "UAPA6A6": "u7-pro-outdoor",
     # Deliberate stand-in: Hamina has no UniFi Express 7 in its catalogue,
     # and it drops an AP whose model it does not know. The Express 7 is
     # Wi-Fi 7 2x2 on 2.4/5/6 and u7-pro is BE 2/2/2, so the radios match.

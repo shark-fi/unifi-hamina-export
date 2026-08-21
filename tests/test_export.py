@@ -1067,3 +1067,7 @@ class ExpressSevenHasACatalogueModel(unittest.TestCase):
         code = "UNHEARDOF"
         self.assertEqual(ux.UNIFI_MODEL_NAMES.get(code, code.lower()),
                          "unheardof")
+
+    def test_the_map_agrees_with_the_live_bridge(self):
+        """The two copies drifted once already; pin the entries that differ."""
+        self.assertEqual(ux.UNIFI_MODEL_NAMES.get("UAPA6A6"), "u7-pro-outdoor")

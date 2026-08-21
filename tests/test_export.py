@@ -1049,3 +1049,21 @@ class NonJsonBody(unittest.TestCase):
         self.assertEqual(self.decode(b'{"data": {"shapes": []}}',
                                      ctype="application/json"),
                          {"data": {"shapes": []}})
+
+
+class ExpressSevenHasACatalogueModel(unittest.TestCase):
+    """A model Hamina does not recognise is dropped on import, silently.
+
+    `UDMA69B` unmapped becomes "udma69b", which matches nothing in Hamina's
+    catalogue -- it carries no UniFi Express 7 under any name. The live bridge
+    saw what that costs: an unrecognised model came back as `missingApModels`
+    with an empty device list, taking the *known* APs down with it.
+    """
+
+    def test_the_express_7_maps_to_a_real_model(self):
+        self.assertEqual(ux.UNIFI_MODEL_NAMES.get("UDMA69B"), "u7-pro")
+
+    def test_an_unknown_code_still_falls_through_lower_cased(self):
+        code = "UNHEARDOF"
+        self.assertEqual(ux.UNIFI_MODEL_NAMES.get(code, code.lower()),
+                         "unheardof")

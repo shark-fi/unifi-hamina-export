@@ -28,7 +28,7 @@ from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
-    needs_own_wall_type, wall_type_shape, wall_shape,
+    needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
 )
 
 
@@ -1070,4 +1070,24 @@ class ExpressSevenHasACatalogueModel(unittest.TestCase):
 
     def test_the_map_agrees_with_the_live_bridge(self):
         """The two copies drifted once already; pin the entries that differ."""
-        self.assertEqual(ux.UNIFI_MODEL_NAMES.get("UAPA6A6"), "u7-pro-outdoor")
+        self.assertEqual(
+            ux.UNIFI_MODEL_NAMES.get("UAPA6A6"), "u7-pro-outdoor-external")
+
+
+class TheOutdoorApSurvivesBothCatalogues(unittest.TestCase):
+    """The two catalogues disagree about this model and both have to be fed.
+
+    Hamina wants the variant (u7-pro-outdoor-external); InnerSpace's product
+    list carries only the bare sku. find_product_id already strips the suffix,
+    so naming the variant satisfies Hamina without breaking the import.
+    """
+
+    PRODUCTS = [{"id": "prod-1", "sku": "U7-Pro-Outdoor", "name": "U7 Pro Outdoor"}]
+
+    def test_the_variant_is_what_hamina_is_told(self):
+        self.assertEqual(
+            ux.UNIFI_MODEL_NAMES.get("UAPA6A6"), "u7-pro-outdoor-external")
+
+    def test_the_variant_still_finds_the_innerspace_product(self):
+        ap = {"model": ux.UNIFI_MODEL_NAMES["UAPA6A6"]}
+        self.assertEqual(find_product_id(ap, self.PRODUCTS), "prod-1")

@@ -23,6 +23,7 @@ import zipfile
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import unifi_export as ux
+from unifi_export import plan_metrics
 import wall_labels as wl
 from openintent_import import (
     INNERSPACE_WALL_VARIANTS, WALL_LABEL_TO_VARIANT, wall_variant,
@@ -1218,3 +1219,52 @@ class PlanOrderingKeepsTheFloorStack(unittest.TestCase):
 
     def test_an_old_plan_with_no_recorded_ordering_is_skipped(self):
         self.assertEqual(plan_ordering(["old-1"], {"old-1": None}, 6, 0), 6)
+
+
+class PlanMetricsPrefersInnerSpacesOwnRegistry(unittest.TestCase):
+    """`planScales` is what InnerSpace renders; the scale SHAPES are not.
+
+    Reconstructing from shapes reported a floor as 9.4 m across where the
+    registry said 129 — and every derived number followed it down: plan
+    dimensions, AP metre coordinates, and an out-of-bounds warning that blamed
+    a "coordinate assumption" instead of naming the scale.
+    """
+
+    SHAPE = {"scale": 38.0911, "height": 2.5,
+             "position": [{"x": -1957.5, "y": 0}, {"x": 1957.5, "y": 0}]}
+    MAP_SCALED = {"scale": {"x": 0.2424, "y": 0.2424, "z": 1}}
+    MAP_PLAIN = {"scale": {"x": 1, "y": 1, "z": 1}}
+
+    def test_the_registry_wins_over_a_scaled_map_and_its_shapes(self):
+        mpp, ceiling, note = plan_metrics(
+            {"scale": 129.2894, "height": 2.7}, self.SHAPE, self.MAP_SCALED, 3915, 2.5)
+        self.assertAlmostEqual(mpp, 129.2894 / 3915, places=6)
+        self.assertEqual(ceiling, 2.7)
+        self.assertIn("planScales", note)
+
+    def test_the_shapes_alone_reproduce_the_original_bug(self):
+        """Pin what the old path computed, so the regression is visible."""
+        mpp, _, _ = plan_metrics(None, self.SHAPE, self.MAP_SCALED, 3915, 2.5)
+        self.assertAlmostEqual(mpp, 0.00236, places=5)   # the 9.4 m floor
+
+    def test_ceiling_height_comes_from_the_registry(self):
+        """Every export said 2.50 m while InnerSpace held 2.7 — coverage uses it."""
+        _, ceiling, _ = plan_metrics(
+            {"scale": 30.4711, "height": 2.7}, self.SHAPE, self.MAP_PLAIN, 1008, 2.5)
+        self.assertEqual(ceiling, 2.7)
+
+    def test_agreement_within_two_percent_is_not_reported(self):
+        reg = {"scale": 38.0911, "height": 2.5}
+        _, _, note = plan_metrics(reg, self.SHAPE, self.MAP_PLAIN, 3915, 2.5)
+        self.assertIsNone(note)
+
+    def test_no_registry_entry_falls_back_and_says_so(self):
+        mpp, _, note = plan_metrics({}, self.SHAPE, self.MAP_PLAIN, 3915, 2.5)
+        self.assertAlmostEqual(mpp, 38.0911 / 3915, places=6)
+        self.assertIn("no planScales", note)
+
+    def test_neither_source_yields_zero_not_a_crash(self):
+        mpp, ceiling, note = plan_metrics(None, None, {}, 3915, 2.5)
+        self.assertEqual(mpp, 0.0)
+        self.assertEqual(ceiling, 2.5)
+        self.assertIsNone(note)

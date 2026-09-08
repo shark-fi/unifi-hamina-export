@@ -68,6 +68,15 @@ def die(msg):
     sys.exit(1)
 
 
+# How much of an error response to keep. A JSON schema error names one missing
+# field at a time, so the previous 300 chars cut the list off mid-word: an
+# InnerSpace rejection listing `attenuation`, `color`, `isDeleted`,
+# `bottomHeight`, `topHeight` and more showed only the first few, and finding
+# the rest cost a round trip against a live console. HTML error pages are still
+# dropped entirely — this bound is for structured bodies worth reading.
+ERROR_BODY_CHARS = 4000
+
+
 class Http:
     """Tiny urllib wrapper with cookie jar and optional TLS-verify skip."""
 
@@ -125,7 +134,7 @@ class Http:
                 detail = " ".join(e.read().decode(errors="replace").split())
                 if detail.startswith("<"):  # HTML error page — not useful
                     detail = ""
-                detail = detail[:300]
+                detail = detail[:ERROR_BODY_CHARS]
             except Exception:
                 pass
             raise RuntimeError(f"{method} {url} -> HTTP {e.code} {detail}".rstrip()) from None

@@ -54,6 +54,7 @@ import zipfile
 # run its CLI — main() is guarded by __main__.)
 from unifi_export import (
     Http, legacy_login, image_size, WALL_VARIANTS, INNERSPACE_SKU_ALIASES,
+    ERROR_BODY_CHARS,
 )
 
 INNERSPACE_API = "/proxy/innerspace/api"
@@ -750,7 +751,7 @@ class Writer:
             with self.http.opener.open(req, timeout=60) as r:
                 out = json.loads(r.read() or b"null")
         except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:400]
+            detail = e.read().decode("utf-8", "replace")[:ERROR_BODY_CHARS]
             raise RuntimeError("image upload -> HTTP %s %s" % (e.code, detail))
         return (out.get("data", {}).get("files") or [None])[0]
 

@@ -1168,6 +1168,7 @@ def run(args):
     ordering_by_id = {pl["id"]: pl.get("ordering")
                       for pl in (data.get("plans") or []) if pl.get("id")}
     new_order: list = []         # [(plan_id, ordering)] for the reorder at the end
+    reassert_scales: list = []   # scale shapes to re-activate once deletes finish
     deleted_plans: set = set()   # --plan-title can point every floorplan at one
     for fp in fps:                # title; never try to delete the same plan twice
         title = _plan_title(args.plan_title, fp["name"])
@@ -1308,13 +1309,22 @@ def run(args):
                     w.shape_remove(old_shapes)  # plan delete orphans them
                 w.delete_plan(oid)
                 deleted_plans.add(oid)
-            # Re-assert the scale afterwards. Deleting the old plan takes its own
-            # `scale` shape with it, and the project's active scale goes with it —
-            # which is why "Set Scale" came back on re-imports even though the new
-            # plan had been scaled minutes earlier. Two idempotent calls.
-            if sc is not None:
-                w.set_unit(args.unit)
-                w.set_scale(sc)
+        # The scale is re-asserted after ALL plans are done, not here: see the
+        # loop epilogue. Doing it per-plan meant the NEXT plan's delete undid
+        # the previous plan's activation, so on a two-floor import the first
+        # floor came back asking to Set Scale again.
+        if sc is not None:
+            reassert_scales.append(sc)
+
+    # Re-assert every plan's scale once all the deletes are done. Deleting a
+    # plan takes its own `scale` shape with it AND clears the project's active
+    # scale, so a scale activated while a later plan still had to be deleted is
+    # undone by that delete. Asserting per-plan inside the loop left the first
+    # floor of a two-floor import prompting "Set Scale" even though it had been
+    # scaled minutes earlier. Idempotent, so re-sending them all is cheap.
+    for sc in reassert_scales:
+        w.set_unit(args.unit)
+        w.set_scale(sc)
 
     # Reorder LAST: the deletes above remove the plans whose positions we are
     # restoring, so asserting the stack before them would be undone.

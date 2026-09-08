@@ -29,6 +29,7 @@ from openintent_import import (
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
     needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
+    Writer,
 )
 
 
@@ -1091,3 +1092,49 @@ class TheOutdoorApSurvivesBothCatalogues(unittest.TestCase):
     def test_the_variant_still_finds_the_innerspace_product(self):
         ap = {"model": ux.UNIFI_MODEL_NAMES["UAPA6A6"]}
         self.assertEqual(find_product_id(ap, self.PRODUCTS), "prod-1")
+
+
+class WallTypeCreateUsesTheEnvelope(unittest.TestCase):
+    """/project/wall-type takes {create, update, remove}, not a bare object.
+
+    Sending the object alone returns HTTP 400 naming all three arrays as
+    Required. It is the first write after the plan and scale, so the run dies
+    there and leaves a correctly-scaled but EMPTY plan behind — walls, devices
+    and the delete of the plan being replaced all never happen. That produced
+    three orphan plans on a live console before anyone read the response body.
+    """
+
+    class _Http:
+        def __init__(self):
+            self.sent = []
+
+        def request(self, method, url, body=None):
+            self.sent.append((method, url, body))
+            return None, None, {}
+
+    def _write(self):
+        http = self._Http()
+        w = Writer(http, "https://console", "sid-1", dry_run=False)
+        out = w.wall_type_create([{"id": "wt-1", "name": "Dry wall"}])
+        return http, out
+
+    def test_the_body_carries_all_three_arrays(self):
+        http, _ = self._write()
+        body = http.sent[0][2]
+        for key in ("create", "update", "remove"):
+            self.assertIn(key, body, "%s is Required by the endpoint" % key)
+
+    def test_the_wall_type_goes_in_create(self):
+        http, _ = self._write()
+        self.assertEqual(http.sent[0][2]["create"], [{"id": "wt-1", "name": "Dry wall"}])
+        self.assertEqual(http.sent[0][2]["update"], [])
+        self.assertEqual(http.sent[0][2]["remove"], [])
+
+    def test_it_still_returns_name_to_id(self):
+        _, out = self._write()
+        self.assertEqual(out, {"Dry wall": "wt-1"})
+
+    def test_a_bare_object_is_not_what_gets_sent(self):
+        """The regression itself: the old code posted the shape unwrapped."""
+        http, _ = self._write()
+        self.assertNotIn("name", http.sent[0][2])

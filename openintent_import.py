@@ -763,10 +763,26 @@ class Writer:
         return plan.get("id"), plan.get("projectId")
 
     def wall_type_create(self, shapes):
-        """POST /project/wall-type, one call per type. Returns name -> id."""
+        """POST /project/wall-type, one call per type. Returns name -> id.
+
+        The endpoint takes the same {create, update, remove} envelope as
+        shape/change, NOT a bare wall-type object. Sending the object alone
+        is rejected with a schema error naming all three arrays as Required:
+
+            HTTP 400 errors.invalid.data — "create": ["Required"],
+                                           "update": ["Required"],
+                                           "remove": ["Required"]
+
+        and because this is the FIRST write after the plan and scale, the run
+        dies here every time — leaving a correctly-scaled but empty plan behind
+        and never reaching the walls, the devices, or the delete of the plan it
+        was replacing. Three attempts against a live console produced three
+        such orphans before the response body was read.
+        """
         out = {}
         for sh in shapes:
-            self.call("POST", "/project/wall-type", sh)
+            self.call("POST", "/project/wall-type",
+                      {"create": [sh], "update": [], "remove": []})
             out[sh["name"]] = sh["id"]
         return out
 

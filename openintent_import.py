@@ -246,6 +246,8 @@ def parse_openintent(zip_path: str) -> dict:
         by_name[name] = {
             "name": name, "image_name": image_name, "image_bytes": image_bytes,
             "img_w": img_w, "img_h": img_h,
+            # Optional: our own exporter writes it, Hamina's export does not.
+            "floor_number": fp.get("floor_number"),
             "width_m": width_m, "length_m": length_m, "ceiling_m": ceiling_m,
             "walls": [_wall(w) for w in (fp.get("wall_segments") or [])],
             "atten": _attenuation_objects(fp),
@@ -657,6 +659,29 @@ WALL_TYPE_DEFAULTS = {
 }
 
 
+def plan_ordering(old_ids, ordering_by_id, floor_number, index):
+    """Where a plan sits in the floor stack. Best evidence first.
+
+    1. The ordering the plan being replaced already had. A re-import must not
+       restack a building someone arranged by hand — which is exactly what
+       happened at NUES: both plans were recreated with the default 0, the UI
+       broke the tie by creation order, and the basement came out above the
+       floor above it.
+    2. `floor_number` from the export. Our own exporter writes it; **Hamina's
+       OpenIntent export does not**, so on a Hamina round trip it is absent and
+       this rule almost never fires.
+    3. The order the floorplans appear in the file — arbitrary, but at least
+       deterministic, where a shared 0 leaves the UI to guess.
+    """
+    inherited = next((ordering_by_id.get(i) for i in old_ids
+                      if ordering_by_id.get(i) is not None), None)
+    if inherited is not None:
+        return inherited
+    if floor_number is not None:
+        return int(floor_number)
+    return index
+
+
 def wall_type_shape(project_id, name, attenuation, template=None):
     """A project wall type named exactly as the source called it.
 
@@ -806,6 +831,15 @@ class Writer:
                       {"create": [sh], "update": [], "remove": []})
             out[sh["name"]] = sh["id"]
         return out
+
+    def plan_order(self, entries):
+        """PATCH /project/plan/order — [{"id": "<plan>", "ordering": n}, ...].
+
+        Plans created without this all land on ordering 0, and the UI breaks the
+        tie by creation order — so a re-import silently restacks the building,
+        putting a basement above the floor above it.
+        """
+        return self.call("PATCH", "/project/plan/order", entries)
 
     def shape_create(self, shapes):
         return self.call("POST", "/shape/change",
@@ -1129,6 +1163,11 @@ def run(args):
                             else "DRY-RUN (no writes; showing planned calls)"))
 
     skipped = []
+    # id -> ordering of every plan that exists now, so replacing one can inherit
+    # the position it already had in the stack.
+    ordering_by_id = {pl["id"]: pl.get("ordering")
+                      for pl in (data.get("plans") or []) if pl.get("id")}
+    new_order: list = []         # [(plan_id, ordering)] for the reorder at the end
     deleted_plans: set = set()   # --plan-title can point every floorplan at one
     for fp in fps:                # title; never try to delete the same plan twice
         title = _plan_title(args.plan_title, fp["name"])
@@ -1139,6 +1178,8 @@ def run(args):
               % (fp["name"], verb, title, fp["img_w"], fp["img_h"]))
         file_url = w.upload_image(fp["image_name"], fp["image_bytes"])
         plan_id, proj_id = w.create_plan(title, file_url)
+        new_order.append((plan_id, plan_ordering(
+            old_ids, ordering_by_id, fp.get("floor_number"), len(new_order))))
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
 
         # set the plan scale first so coverage renders accurately (no "Set Scale").
@@ -1274,6 +1315,19 @@ def run(args):
             if sc is not None:
                 w.set_unit(args.unit)
                 w.set_scale(sc)
+
+    # Reorder LAST: the deletes above remove the plans whose positions we are
+    # restoring, so asserting the stack before them would be undone.
+    if new_order and len({o for _, o in new_order}) > 1:
+        print("\n  plan order: %s" % ", ".join(
+            "%s=%d" % (fp["name"], o)
+            for fp, (_, o) in zip(fps, new_order)))
+        w.plan_order([{"id": pid, "ordering": o} for pid, o in new_order])
+    elif new_order:
+        # Every plan resolved to the same position, so a reorder would be a
+        # no-op that still looks like one was applied. Say why instead.
+        print("\n  plan order: not set — no floor_number in the export and "
+              "nothing to inherit; arrange the floors in InnerSpace")
 
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))
     if skipped:

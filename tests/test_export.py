@@ -29,7 +29,7 @@ from openintent_import import (
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
     needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
-    Writer, WALL_TYPE_DEFAULTS,
+    Writer, WALL_TYPE_DEFAULTS, plan_ordering,
 )
 
 
@@ -1183,3 +1183,38 @@ class WallTypeShapeIsCompleteWithoutATemplate(unittest.TestCase):
         sh = wall_type_shape("proj-1", "Odd", 5.0, {"color": "#000000"})
         for key in ("attenuation", "attenuationDb", "loss", "value"):
             self.assertNotIn(key, sh)
+
+
+class PlanOrderingKeepsTheFloorStack(unittest.TestCase):
+    """Re-importing must not restack a building someone arranged by hand.
+
+    Plans created without an explicit ordering all land on 0, and the UI breaks
+    the tie by creation order — which put the NUES basement above the floor
+    above it after a re-import.
+    """
+
+    def test_the_replaced_plans_position_is_inherited(self):
+        self.assertEqual(
+            plan_ordering(["old-1"], {"old-1": 3}, None, 0), 3)
+
+    def test_inheriting_beats_floor_number(self):
+        """The console reflects what someone actually arranged; the file does not."""
+        self.assertEqual(
+            plan_ordering(["old-1"], {"old-1": 3}, 7, 0), 3)
+
+    def test_floor_number_is_used_for_a_genuinely_new_plan(self):
+        self.assertEqual(plan_ordering([], {}, 2, 0), 2)
+
+    def test_a_zero_ordering_is_inherited_not_treated_as_missing(self):
+        """0 is a real position — `or` would have skipped straight past it."""
+        self.assertEqual(plan_ordering(["old-1"], {"old-1": 0}, 9, 5), 0)
+
+    def test_a_floor_number_of_zero_is_used(self):
+        self.assertEqual(plan_ordering([], {}, 0, 4), 0)
+
+    def test_it_falls_back_to_file_order(self):
+        """Hamina's export carries no floor_number, so this is the usual path."""
+        self.assertEqual(plan_ordering([], {}, None, 1), 1)
+
+    def test_an_old_plan_with_no_recorded_ordering_is_skipped(self):
+        self.assertEqual(plan_ordering(["old-1"], {"old-1": None}, 6, 0), 6)

@@ -637,6 +637,26 @@ def wall_shape(plan_id, project_id, variant, a, b, wall_type_id=None):
     return shape
 
 
+# Every field InnerSpace 1.3.23 requires on a wall type, with values verified
+# accepted against a live console (2026-09-08). These are the fallback for a
+# project that has NO wall type yet, because the normal path copies an existing
+# one rather than inventing fields — and with nothing to copy, the import sent a
+# bare object, was rejected, and died on call 6 of 29. By then it had already
+# created the replacement plan, so every attempt stranded an empty duplicate:
+# five of them before the response body was read in full.
+#
+# `attenuation` is overwritten per wall variant; the rest are neutral defaults.
+WALL_TYPE_DEFAULTS = {
+    "attenuation": 3.0,
+    "color": "#9E9E9E",
+    "isDeleted": False,
+    "bottomHeight": 0,
+    "topHeight": 2.5,
+    "transparent": False,
+    "autoFillEnabled": False,
+}
+
+
 def wall_type_shape(project_id, name, attenuation, template=None):
     """A project wall type named exactly as the source called it.
 
@@ -645,15 +665,15 @@ def wall_type_shape(project_id, name, attenuation, template=None):
     published; copying a real one and substituting id/name is the difference
     between adapting to whatever the console expects and guessing at it.
     """
-    shape = dict(template or {})
+    shape = dict(template) if template else dict(WALL_TYPE_DEFAULTS)
     shape.update({
         "id": str(uuid.uuid4()), "projectId": project_id, "name": name,
         "createdAt": _ISO, "updatedAt": _ISO,
     })
-    # Only set attenuation if the template has such a field — the name varies
-    # and inventing one risks rejection of the whole call.
+    # Only set attenuation if the shape has such a field — the name varies
+    # between versions and inventing one risks rejection of the whole call.
     for key in ("attenuation", "attenuationDb", "loss", "value"):
-        if template and key in template:
+        if key in shape:
             shape[key] = attenuation
             break
     return shape

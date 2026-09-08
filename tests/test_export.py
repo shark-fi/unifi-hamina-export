@@ -29,7 +29,7 @@ from openintent_import import (
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
     needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
-    Writer,
+    Writer, WALL_TYPE_DEFAULTS,
 )
 
 
@@ -1138,3 +1138,48 @@ class WallTypeCreateUsesTheEnvelope(unittest.TestCase):
         """The regression itself: the old code posted the shape unwrapped."""
         http, _ = self._write()
         self.assertNotIn("name", http.sent[0][2])
+
+
+class WallTypeShapeIsCompleteWithoutATemplate(unittest.TestCase):
+    """A project with no wall type yet has nothing to copy from.
+
+    The normal path clones an existing wall type so no field is invented. With
+    none to clone it sent a bare object, InnerSpace rejected it as missing
+    seven required fields, and the run died on call 6 of 29 — after creating
+    the replacement plan, so each attempt stranded an empty duplicate.
+    """
+
+    REQUIRED = ("attenuation", "color", "isDeleted", "bottomHeight",
+                "topHeight", "transparent", "autoFillEnabled")
+
+    def test_every_required_field_is_present(self):
+        sh = wall_type_shape("proj-1", "Dry wall", 4.5)
+        for key in self.REQUIRED:
+            self.assertIn(key, sh, "%s is Required by InnerSpace 1.3.23" % key)
+
+    def test_attenuation_comes_from_the_variant_not_the_default(self):
+        sh = wall_type_shape("proj-1", "Concrete", 12.0)
+        self.assertEqual(sh["attenuation"], 12.0)
+        self.assertNotEqual(sh["attenuation"], WALL_TYPE_DEFAULTS["attenuation"])
+
+    def test_identity_fields_are_set(self):
+        sh = wall_type_shape("proj-1", "Dry wall", 3.0)
+        self.assertEqual(sh["projectId"], "proj-1")
+        self.assertEqual(sh["name"], "Dry wall")
+        self.assertTrue(sh["id"])
+
+    def test_a_template_still_wins_over_the_defaults(self):
+        """A real console's own wall type is better evidence than our guesses."""
+        tpl = {"attenuation": 1.0, "color": "#123456", "isDeleted": False,
+               "bottomHeight": 0, "topHeight": 3.4, "transparent": True,
+               "autoFillEnabled": True, "overridesVariant": None}
+        sh = wall_type_shape("proj-1", "Glass", 7.0, tpl)
+        self.assertEqual(sh["color"], "#123456")      # template value kept
+        self.assertEqual(sh["topHeight"], 3.4)
+        self.assertIn("overridesVariant", sh)          # unknown fields survive
+        self.assertEqual(sh["attenuation"], 7.0)       # but attenuation is ours
+
+    def test_a_template_without_an_attenuation_field_gets_none_invented(self):
+        sh = wall_type_shape("proj-1", "Odd", 5.0, {"color": "#000000"})
+        for key in ("attenuation", "attenuationDb", "loss", "value"):
+            self.assertNotIn(key, sh)

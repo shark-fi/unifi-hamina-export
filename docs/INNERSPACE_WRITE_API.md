@@ -5,6 +5,12 @@ a real InnerSpace session via HAR (create plan, upload image, place/move devices
 draw walls of every material, add attenuation objects, custom types, reorder,
 delete plan).
 
+> **Status (2026-09-08):** re-verified against InnerSpace **1.3.23** on a live
+> console. The shapes below held up; where 1.3.23 enforces more than the capture
+> shows, it is called out inline. Note that the wall-type envelope and field list
+> here were correct all along — `openintent_import.py` had drifted from them, and
+> the cost was five orphan plans. **Trust this file over the implementation.**
+
 - **Base:** `/proxy/innerspace/api`
 - **Auth:** cookie + `X-CSRF-Token` (same as the read path / `legacy_login`).
 - **`?socketId=<uuid>`** query param on mutating calls — the caller's websocket
@@ -82,6 +88,30 @@ Built-in variants: `car`, `cubicles`, `elevator`, `foliage_heavy`, `foliage_ligh
     "variantKey":"custom-<id>", "isCustom":true, "isDeleted":false,
     "renderOrder":0, "projectId":"<proj>" }
   ```
+  **Seven of those fields are enforced** (verified against 1.3.23, 2026-09-08).
+  Omit any of `attenuation`, `color`, `isDeleted`, `bottomHeight`, `topHeight`,
+  `transparent`, `autoFillEnabled` and the call is rejected:
+
+  ```
+  HTTP 400 errors.invalid.data — "create":{"0":{"attenuation":{"_errors":
+  ["Required"]}, "color":{"_errors":["Required"]}, …}}
+  ```
+
+  The rest of the captured fields (`thicknessM`, `thicknessPx`, `variant`,
+  `variantKey`, `isCustom`, `renderOrder`) are optional — a create with only
+  `id, projectId, name, createdAt, updatedAt` **plus those seven** succeeds, and
+  the server fills in `overridesVariant` itself. `bottomHeight: 0` is accepted
+  where the capture shows `null`.
+
+  **The trap:** `openintent_import.py` clones an existing wall type rather than
+  inventing fields, so a project with **no wall types at all** had nothing to
+  clone and sent a bare object. That call is #6 of 29 — after the image, the
+  plan and the scale — so each failure stranded a correctly-scaled but empty
+  duplicate plan and never reached the walls, the devices, or the delete of the
+  plan being replaced. Five orphans accumulated before the response body was
+  read in full. `WALL_TYPE_DEFAULTS` now supplies the seven when there is no
+  template.
+
 - `POST /project/attenuation-object-type?socketId=…` — same envelope, object
   fields: `id,name,attenuation,color,topHeight,bottomHeight,variant:"custom",
   variantKey,isCustom,isDeleted,renderOrder,projectId`.
@@ -120,6 +150,10 @@ omit for stdout) — offline, no console needed.
 ## Plan management
 
 - `PATCH /project/plan/order?socketId=…` — `[{"id":"<plan>","ordering":0}, …]`
+  Plans created without this all land on `ordering: 0` and the UI breaks the tie
+  by creation order, so a re-import restacks the building — a basement can come
+  back above the floor above it. On a re-import, **run the reorder after the
+  deletes**: they remove the very plans whose positions are being inherited.
 - `DELETE /project/plan/<planId>?socketId=…` → returns the remaining `plans[]`.
 
 ## Coordinates
@@ -131,9 +165,17 @@ export direction).
 
 ## Open items for the writer (Phase 4)
 
-1. **socketId** — obtain a real websocket session id, or test whether a random /
-   omitted value is accepted (writes may still persist; the id is mainly for
-   change broadcast/echo-suppression).
+1. **socketId** — RESOLVED (2026-09-08, against InnerSpace 1.3.23). A **random
+   uuid4 is accepted and the write persists** — no live websocket session is
+   needed. Verified by creating a plan, a scale, wall types, 122 walls and
+   3 devices with a synthesized id, then re-GETting `/project?mode=2D`. The id
+   really is only for change broadcast / echo-suppression.
+
+   What a bad socketId does NOT explain is a 403: UniFi OS rejects any mutating
+   request without `X-CSRF-Token` before InnerSpace sees it, and the two failures
+   look nothing alike — a 403 is `{"error":{"code":403,"message":"Forbidden"}}`
+   from UniFi OS, while InnerSpace's own rejections are `{"error":{"type":
+   "schema",...}}` with per-field detail.
 2. **Verify writes** by re-GETting `/project?mode=2D` (POST responses are empty).
 3. **productId mapping** — build OpenIntent `model` → InnerSpace `productId` from
    the `products[]` catalog (reverse of `INNERSPACE_SKU_ALIASES`).

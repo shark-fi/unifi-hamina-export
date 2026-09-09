@@ -956,7 +956,13 @@ def load_catalog(args, http_, base):
     for wt in data.get("wallTypes") or []:
         if wt.get("name"):
             wall_types[wt["name"].strip().lower()] = wt
+    # plan id -> its position in the floor stack, so replacing a plan can
+    # inherit the position it already had. Built here because the project
+    # payload does not survive this function.
+    ordering_by_id = {pl["id"]: pl.get("ordering")
+                      for pl in (data.get("plans") or []) if pl.get("id")}
     return (pid, products, name_to_mac, plans_by_title, dict(shapes_by_plan),
+            ordering_by_id,
             wall_types)
 
 
@@ -1129,7 +1135,7 @@ def run(args):
         csrf = apply_csrf(http_)
         print("auth: X-CSRF-Token %s" % ("acquired" if csrf else "NOT FOUND (writes may 403)"))
     (project_id, products, name_to_mac, plans_by_title, shapes_by_plan,
-     wall_types) = load_catalog(args, http_, base)
+     ordering_by_id, wall_types) = load_catalog(args, http_, base)
     print("catalog: %d product(s), %d adopted device MAC(s); projectId=%s"
           % (len(products), len(name_to_mac), project_id))
     replace = not args.no_replace
@@ -1163,10 +1169,6 @@ def run(args):
                             else "DRY-RUN (no writes; showing planned calls)"))
 
     skipped = []
-    # id -> ordering of every plan that exists now, so replacing one can inherit
-    # the position it already had in the stack.
-    ordering_by_id = {pl["id"]: pl.get("ordering")
-                      for pl in (data.get("plans") or []) if pl.get("id")}
     new_order: list = []         # [(plan_id, ordering)] for the reorder at the end
     deleted_plans: set = set()   # --plan-title can point every floorplan at one
     for fp in fps:                # title; never try to delete the same plan twice

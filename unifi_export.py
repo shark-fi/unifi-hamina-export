@@ -578,6 +578,59 @@ def scene_to_pixels(pt, map_shape, img_w, img_h):
     return x, y
 
 
+def plan_metrics(registry, scale_shape, map_shape, img_w, default_ceiling):
+    """(metres per image pixel, ceiling metres, note) for one InnerSpace plan.
+
+    InnerSpace keeps the authoritative scale in the project's **`planScales`**
+    registry, keyed by plan id — `{"scale": <metres across the image>,
+    "height": <ceiling m>}`. That is what the app renders and what its Set Scale
+    dialog writes.
+
+    The per-plan `scale` SHAPES are not authoritative. Reconstructing a value
+    from them (shape metres / shape line length, times the map shape's scale)
+    can disagree wildly, and did: one plan carried TWO conflicting scale shapes
+    and a map scaled to 0.2424, which reconstructed to 0.0024 m/px against a
+    registry value of 0.0330 — a floor reported as 9.4 m across instead of 129.
+    Every derived number was wrong: plan dimensions, AP metre coordinates, and
+    the out-of-bounds warning that blamed a "coordinate assumption".
+
+    Shapes remain the fallback, because a plan can exist with no registry entry.
+    When both are present and disagree, say so rather than silently picking one.
+    """
+    ceiling = default_ceiling
+    note = None
+
+    mpu = 0.0
+    if scale_shape:
+        pos = scale_shape.get("position") or []
+        if len(pos) >= 2 and scale_shape.get("scale"):
+            dist = ((pos[1]["x"] - pos[0]["x"]) ** 2 +
+                    (pos[1]["y"] - pos[0]["y"]) ** 2) ** 0.5
+            if dist:
+                mpu = float(scale_shape["scale"]) / dist
+        if scale_shape.get("height"):
+            ceiling = float(scale_shape["height"])
+    sx = float((map_shape.get("scale") or {}).get("x") or 1) or 1
+    from_shapes = mpu * sx
+
+    reg = registry or {}
+    from_registry = 0.0
+    if reg.get("scale") and img_w:
+        from_registry = float(reg["scale"]) / float(img_w)
+    if reg.get("height"):
+        ceiling = float(reg["height"])
+
+    if from_registry:
+        if from_shapes and abs(from_registry - from_shapes) > 0.02 * from_registry:
+            note = ("scale shapes say %.4f m/px, InnerSpace's own planScales says "
+                    "%.4f — using planScales" % (from_shapes, from_registry))
+        return from_registry, ceiling, note
+    if from_shapes:
+        return from_shapes, ceiling, ("no planScales entry — falling back to the "
+                                      "scale shapes, which InnerSpace does not use")
+    return 0.0, ceiling, None
+
+
 def run_innerspace(args):
     http_ = Http(verify=args.verify_tls)
     base = args.host.rstrip("/")
@@ -593,6 +646,8 @@ def run_innerspace(args):
 
     shapes = data.get("shapes") or []
     plans = {p["id"]: p for p in data.get("plans") or []}
+    # InnerSpace's own scale registry — see plan_metrics(). Authoritative.
+    plan_scales = data.get("planScales") or {}
     products = {p["id"]: p for p in data.get("products") or []}
     unit_imperial = (data.get("project") or {}).get("unit") == "imperial"
     unknown_variants = collections.Counter()
@@ -665,19 +720,10 @@ def run_innerspace(args):
             continue
         img_w, img_h = size
 
-        # metres per scene unit from the user's scale line
-        mpu, ceiling = 0.0, args.ap_height
-        if scale_shape:
-            p = scale_shape.get("position") or []
-            if len(p) >= 2 and scale_shape.get("scale"):
-                dist = ((p[1]["x"] - p[0]["x"]) ** 2 +
-                        (p[1]["y"] - p[0]["y"]) ** 2) ** 0.5
-                if dist:
-                    mpu = float(scale_shape["scale"]) / dist
-            if scale_shape.get("height"):
-                ceiling = float(scale_shape["height"])
-        sx = float((map_shape.get("scale") or {}).get("x") or 1) or 1
-        mpp = mpu * sx  # metres per image pixel
+        mpp, ceiling, scale_note = plan_metrics(
+            plan_scales.get(pid), scale_shape, map_shape, img_w, args.ap_height)
+        if scale_note:
+            print(f"note: plan '{title}': {scale_note}", file=sys.stderr)
         if not mpp:
             print(f"warning: plan '{title}' has no scale set in InnerSpace — "
                   "exporting pixels only; set the scale in Hamina after import",

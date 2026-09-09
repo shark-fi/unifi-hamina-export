@@ -179,13 +179,26 @@ export direction).
 2. **Verify writes** by re-GETting `/project?mode=2D` (POST responses are empty).
 3. **productId mapping** — build OpenIntent `model` → InnerSpace `productId` from
    the `products[]` catalog (reverse of `INNERSPACE_SKU_ALIASES`).
-4. **Scale** — RESOLVED (captured from the real Set-Scale UI flow). A plan's
-   `scale` shape must be **activated**, not merely created: re-send it via
-   `POST /shape/change` with a **top-level `"type":"scale"`** marker in the
-   `update` array — `{"mode":"2D","type":"scale","create":[],"update":[<scale
-   shape>],"remove":[]}`. Creating the shape alone leaves the plan prompting
-   "Set Scale"; the top-level `type` is what makes InnerSpace recompute the
-   plan's metres/unit. A cosmetic `PATCH /project {"unit":"imperial"|"metric"}`
-   fires alongside it in the UI but is not required for the scale to take.
+4. **Scale** — RESOLVED (decoded from the 1.3.23 `swai.js` bundle's Set Scale
+   handler, `cdn.pkg.svc.ui.com/innerspace-ui/1.3.23-4d1d6b29fc/swai.js`).
+   Two things must both be true for the server-side `planScales` registry —
+   what InnerSpace actually renders and measures from — to take the value:
+
+   - The write goes via `POST /shape/change` with a **top-level
+     `"type":"scale"`** marker: `{"mode":"2D","type":"scale","create":[],
+     "update":[<scale shape>],"remove":[…]}`.
+   - The `update` entry targets the **plan's own pre-existing scale shape by
+     its id**. Set Scale never creates a shape — every plan already has one
+     (auto-detected from the image, or the console default) and the registry
+     follows *that* shape. Updating a shape the importer created itself
+     succeeds as an API call but leaves the registry — and the "Set Scale"
+     prompt — untouched. Find it in `GET /project?mode=2D` → `shapes[]` where
+     `type=="scale" && planId==<plan>`.
+
+   The dialog's update carries `defaultScale:false`, `autoDetectedScale:false`
+   and `computedScale:null` (both flags cleared explicitly — a shape still
+   flagged auto-detected is not a user-set scale), positions in world
+   coordinates, and `remove` holding the drawn measuring line. A
+   `PATCH /project {"unit":"imperial"|"metric"}` fires immediately before it.
 5. **Safety** — write to a **new** plan by default, `--dry-run` first, never
    clobber an existing plan.

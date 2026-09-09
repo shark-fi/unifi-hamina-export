@@ -31,6 +31,7 @@ from openintent_import import (
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
     needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
     Writer, WALL_TYPE_DEFAULTS, plan_ordering, verify_plan_scales,
+    scale_shape, find_plan_scales, pick_plan_scale, adopt_plan_scale,
 )
 
 
@@ -1321,3 +1322,111 @@ class VerifyPlanScalesSurfacesAStaleRegistry(unittest.TestCase):
         with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
             verify_plan_scales(Boom(), "https://c", [("p1", "Downstairs", 28.3895)])
         self.assertIn("could not verify", buf.getvalue())
+
+
+class SetScaleUpdatesThePlansOwnShape(unittest.TestCase):
+    """The `planScales` registry follows the plan's pre-existing scale shape.
+
+    The 1.3.23 Set Scale dialog updates that shape in place — it never creates
+    one — clearing `defaultScale` and `autoDetectedScale` explicitly. The
+    importer creating its own shape and updating it is what left the registry
+    stale (42.29 m default) while every API call reported success.
+    """
+
+    CONSOLE = {"id": "s-own", "planId": "p1", "projectId": "prj",
+               "type": "scale", "scale": 42.2945, "height": 2.5,
+               "defaultScale": True, "autoDetectedScale": True,
+               "rotation": {"base": {"x": 0.0}, "pov": {}}}
+    STRAY = {"id": "s-stray", "planId": "p1", "type": "scale",
+             "scale": 28.39, "defaultScale": False}
+
+    class _Http:
+        def __init__(self, shapes=None, boom=False):
+            self.shapes, self.boom = shapes, boom
+
+        def get_json(self, url):
+            if self.boom:
+                raise RuntimeError("connection reset")
+            return {"data": {"shapes": self.shapes}}
+
+    def test_the_shape_we_send_clears_auto_detected(self):
+        sc = scale_shape("p1", "prj", 1000, 28.3895, 2.5)
+        self.assertIs(sc["autoDetectedScale"], False)
+        self.assertIs(sc["defaultScale"], False)
+
+    def test_find_returns_only_that_plans_scale_shapes(self):
+        shapes = [self.CONSOLE, self.STRAY,
+                  {"id": "w1", "planId": "p1", "type": "wall"},
+                  {"id": "s-other", "planId": "p2", "type": "scale"}]
+        got = find_plan_scales(self._Http(shapes), "https://c", "p1")
+        self.assertEqual([s["id"] for s in got], ["s-own", "s-stray"])
+
+    def test_a_failed_read_returns_empty_so_the_import_continues(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            got = find_plan_scales(self._Http(boom=True), "https://c", "p1")
+        self.assertEqual(got, [])
+        self.assertIn("could not read", buf.getvalue())
+
+    def test_the_consoles_flagged_shape_is_canonical(self):
+        # order must not matter: the registry tracks the flagged shape even
+        # when a stray import-created one sorts first
+        canonical, extras = pick_plan_scale([self.STRAY, self.CONSOLE])
+        self.assertEqual(canonical["id"], "s-own")
+        self.assertEqual([s["id"] for s in extras], ["s-stray"])
+
+    def test_with_no_flagged_shape_the_first_wins(self):
+        lone = {"id": "s-a", "planId": "p1", "type": "scale",
+                "defaultScale": False}
+        canonical, extras = pick_plan_scale([lone])
+        self.assertEqual(canonical["id"], "s-a")
+        self.assertEqual(extras, [])
+
+    def test_adopt_keeps_the_server_id_and_takes_our_metres(self):
+        sc = scale_shape("p1", "prj", 1000, 28.3895, 2.7)
+        out = adopt_plan_scale(self.CONSOLE, sc)
+        self.assertEqual(out["id"], "s-own")          # the registry's shape
+        self.assertEqual(out["scale"], 28.3895)
+        self.assertEqual(out["height"], 2.7)
+        self.assertEqual(out["position"], sc["position"])
+        self.assertIs(out["defaultScale"], False)
+        self.assertIs(out["autoDetectedScale"], False)
+        self.assertIsNone(out["computedScale"])
+
+    def test_adopt_fills_the_rotation_quaternion(self):
+        # shapes read back can carry partial quaternions that 400 on re-send
+        out = adopt_plan_scale(self.CONSOLE,
+                               scale_shape("p1", "prj", 1000, 28.0, 2.5))
+        self.assertEqual(out["rotation"]["base"]["w"], 0.0)
+        self.assertEqual(out["rotation"]["pov"]["z"], 0.0)
+
+    def test_set_scale_carries_the_surplus_removals(self):
+        class _Sink:
+            def __init__(self):
+                self.sent = []
+
+            def request(self, method, url, body=None):
+                self.sent.append((method, url, body))
+                return None, None, {}
+
+        http = _Sink()
+        w = Writer(http, "https://console", "sid-1", dry_run=False)
+        w.set_scale({"id": "s-own"}, remove=[{"id": "s-stray"}])
+        body = http.sent[0][2]
+        self.assertEqual(body["type"], "scale")
+        self.assertEqual(body["update"], [{"id": "s-own"}])
+        self.assertEqual(body["remove"], [{"id": "s-stray"}])
+
+    def test_set_scale_without_removals_sends_an_empty_array(self):
+        class _Sink:
+            def __init__(self):
+                self.sent = []
+
+            def request(self, method, url, body=None):
+                self.sent.append((method, url, body))
+                return None, None, {}
+
+        http = _Sink()
+        w = Writer(http, "https://console", "sid-1", dry_run=False)
+        w.set_scale({"id": "s-own"})
+        self.assertEqual(http.sent[0][2]["remove"], [])

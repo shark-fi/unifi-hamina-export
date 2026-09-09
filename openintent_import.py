@@ -613,7 +613,11 @@ def scale_shape(plan_id, project_id, img_w, width_m, ceiling_m):
     accurately (no "Set Scale" prompt). A full-width scale line spanning `img_w`
     px carries `width_m` metres, giving metres/px = width_m/img_w — the same
     scale the OpenIntent file was built with. Fresh plans have map scale 1 and
-    origin-centre, so scene x runs -img_w/2 .. +img_w/2."""
+    origin-centre, so scene x runs -img_w/2 .. +img_w/2.
+
+    `autoDetectedScale: false` matters: the 1.3.23 Set Scale dialog clears it
+    explicitly alongside `defaultScale`, and a shape still flagged as
+    auto-detected is not treated as a user-set scale."""
     half = round(img_w / 2.0, 4)
     return {
         "id": str(uuid.uuid4()), "planId": plan_id, "projectId": project_id,
@@ -621,8 +625,57 @@ def scale_shape(plan_id, project_id, img_w, width_m, ceiling_m):
         "position": [{"x": -half, "y": 0, "z": 0}, {"x": half, "y": 0, "z": 0}],
         "scale": round(width_m, 4), "height": ceiling_m,
         "computedScale": None, "defaultScale": False, "defaultHeight": False,
+        "autoDetectedScale": False,
         "createdAt": _ISO, "updatedAt": _ISO,
     }
+
+
+def find_plan_scales(http_, base, plan_id):
+    """The plan's own `scale` shape(s), read back from GET /project.
+
+    InnerSpace gives a new plan a scale shape of its own (auto-detected from
+    the image, or the 42.29 m default), and the server-side `planScales`
+    registry follows THAT shape. The 1.3.23 Set Scale dialog never creates a
+    shape — it updates the existing one in place — which is why the importer
+    creating a second shape left the registry stale and "Set Scale" prompting.
+    Returns [] when the read fails so the caller can fall back to creating one.
+    """
+    try:
+        data = http_.get_json("%s%s/project?mode=2D"
+                              % (base, INNERSPACE_API)).get("data", {})
+    except Exception as e:                                    # noqa: BLE001
+        print("  note: could not read the plan's scale shapes (%s)" % e)
+        return []
+    return [s for s in data.get("shapes") or []
+            if s.get("type") == "scale" and s.get("planId") == plan_id
+            and s.get("id")]
+
+
+def pick_plan_scale(scales):
+    """(canonical, extras) from a plan's scale shapes. The console's own shape
+    — flagged defaultScale or autoDetectedScale — is the one the registry
+    tracks; anything else (e.g. a stray shape from an earlier import) is an
+    extra to remove in the same call, mirroring how Set Scale removes the
+    drawn measuring line."""
+    flagged = [s for s in scales
+               if s.get("defaultScale") or s.get("autoDetectedScale")]
+    canonical = (flagged or scales)[0]
+    return canonical, [s for s in scales if s is not canonical]
+
+
+def adopt_plan_scale(existing, sc):
+    """Graft the import's scale onto the plan's existing scale shape: keep the
+    server-known id (and anything else the server sent), take our line and
+    metres, and clear the flags exactly as the Set Scale dialog does."""
+    out = _remove_ready(existing)
+    out.update({
+        "position": sc["position"],
+        "scale": sc["scale"], "height": sc["height"],
+        "computedScale": None, "defaultScale": False, "defaultHeight": False,
+        "autoDetectedScale": False,
+        "updatedAt": _ISO,
+    })
+    return out
 
 
 def wall_shape(plan_id, project_id, variant, a, b, wall_type_id=None):
@@ -851,16 +904,17 @@ class Writer:
         treated as scaled once the unit is committed alongside the scale shape."""
         return self.call("PATCH", "/project", {"unit": unit})
 
-    def set_scale(self, scale_obj):
-        """Activate a plan's scale. Creating the `scale` shape alone does NOT
-        make InnerSpace recompute the plan's active metres/unit — that only
-        happens when the shape is re-sent in the `update` array with a
-        top-level `"type":"scale"` marker (captured from the real Set-Scale
-        UI flow), preceded by the set_unit() PATCH. Without this the plan keeps
-        prompting 'Set Scale'."""
+    def set_scale(self, scale_obj, remove=None):
+        """Activate a plan's scale. The shape goes in the `update` array with a
+        top-level `"type":"scale"` marker, preceded by the set_unit() PATCH —
+        decoded from the 1.3.23 Set Scale flow in the innerspace-ui bundle.
+        Crucially the update must target the plan's OWN scale shape (see
+        find_plan_scales); a freshly created shape updates fine but the
+        `planScales` registry keeps following the original. `remove` carries
+        any surplus scale shapes, as Set Scale removes the drawn line."""
         return self.call("POST", "/shape/change",
-                         {"mode": "2D", "type": "scale",
-                          "create": [], "update": [scale_obj], "remove": []})
+                         {"mode": "2D", "type": "scale", "create": [],
+                          "update": [scale_obj], "remove": remove or []})
 
     def shape_remove(self, shapes):
         return self.call("POST", "/shape/change",
@@ -915,16 +969,15 @@ def fetch_adopted_macs(http_, base, site):
 def verify_plan_scales(http_, base, checks):
     """Report whether InnerSpace's own scale registry matches what we wrote.
 
-    A plan's real scale lives in the project's `planScales` map, NOT in the
-    `scale` shapes this importer creates — InnerSpace renders and measures from
-    the registry, and its Set Scale dialog is what writes it. We have no
-    endpoint for it, so a freshly imported plan keeps whatever default the
-    console assigned (42.29 m on the console this was found on), regardless of
-    the metres in the export.
+    A plan's real scale lives in the project's `planScales` map, NOT in any
+    `scale` shape as such — the registry follows the plan's OWN scale shape,
+    which the importer now updates in place (see find_plan_scales). This check
+    is the assertion that that write actually took: re-read the project and
+    compare.
 
-    Left unsaid, that is invisible: the import reports success, the shapes hold
-    the right numbers, and the plan silently measures wrong until someone
-    notices a floor is the wrong size. So re-read the project and say so.
+    Left unsaid, a miss is invisible: the import reports success, the shapes
+    hold the right numbers, and the plan silently measures wrong until someone
+    notices a floor is the wrong size.
     """
     try:
         data = http_.get_json("%s%s/project?mode=2D" % (base, INNERSPACE_API)).get("data", {})
@@ -946,10 +999,10 @@ def verify_plan_scales(http_, base, checks):
         print("  %-14s registry says %s, the export says %.4f m (%.2f ft)"
               % (title, "nothing" if got is None else "%.4f m" % got,
                  want, want * 3.28084), file=sys.stderr)
-    print("  InnerSpace measures from `planScales`, not from the `scale` shapes\n"
-          "  this tool writes, and there is no API to set it. Open each plan and\n"
-          "  use Set Scale with the figure above, or coverage will be modelled on\n"
-          "  the wrong building size.", file=sys.stderr)
+    print("  InnerSpace measures from `planScales`, which follows the plan's own\n"
+          "  scale shape. Updating it in place should have set it; since it did\n"
+          "  not take, open each plan and use Set Scale with the figure above, or\n"
+          "  coverage will be modelled on the wrong building size.", file=sys.stderr)
 
 
 def load_catalog(args, http_, base):
@@ -1230,17 +1283,31 @@ def run(args):
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
 
         # set the plan scale first so coverage renders accurately (no "Set Scale").
-        # Two steps, mirroring the real UI: (1) create the `scale` shape on the
-        # plan, then (2) re-send it via /shape/change with a top-level
-        # "type":"scale" marker, which is what actually triggers InnerSpace to
-        # recompute the plan's metres/unit.
+        # The Set Scale dialog UPDATES the plan's existing scale shape in place —
+        # it never creates one — and the server-side `planScales` registry follows
+        # that shape. So: find the shape the console gave the new plan and update
+        # it; only if none can be read does the old create-then-update path run
+        # (which scales the shapes but is known to leave the registry stale).
         sc = None
         if fp.get("width_m"):
             sc = scale_shape(plan_id, proj_id, fp["img_w"],
                              fp["width_m"], fp["ceiling_m"])
-            w.shape_create([sc])
-            w.set_unit(args.unit)
-            w.set_scale(sc)
+            own = find_plan_scales(http_, base, plan_id) if args.commit else []
+            if own:
+                canonical, extras = pick_plan_scale(own)
+                print("  adopting the plan's own scale shape %s%s"
+                      % (canonical["id"],
+                         " (removing %d surplus)" % len(extras) if extras else ""))
+                sc = adopt_plan_scale(canonical, sc)
+                w.set_unit(args.unit)
+                w.set_scale(sc, remove=[_remove_ready(s) for s in extras])
+            else:
+                if args.commit:
+                    print("  no scale shape on the new plan — creating one "
+                          "(registry may need Set Scale; the check below will say)")
+                w.shape_create([sc])
+                w.set_unit(args.unit)
+                w.set_scale(sc)
         else:
             print("  (no metres dimension in the export -> scale left unset)")
 

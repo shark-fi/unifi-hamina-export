@@ -912,6 +912,46 @@ def fetch_adopted_macs(http_, base, site):
 
 
 # --- catalog (product list + projectId + adopted device name->MAC) --------
+def verify_plan_scales(http_, base, checks):
+    """Report whether InnerSpace's own scale registry matches what we wrote.
+
+    A plan's real scale lives in the project's `planScales` map, NOT in the
+    `scale` shapes this importer creates — InnerSpace renders and measures from
+    the registry, and its Set Scale dialog is what writes it. We have no
+    endpoint for it, so a freshly imported plan keeps whatever default the
+    console assigned (42.29 m on the console this was found on), regardless of
+    the metres in the export.
+
+    Left unsaid, that is invisible: the import reports success, the shapes hold
+    the right numbers, and the plan silently measures wrong until someone
+    notices a floor is the wrong size. So re-read the project and say so.
+    """
+    try:
+        data = http_.get_json("%s%s/project?mode=2D" % (base, INNERSPACE_API)).get("data", {})
+    except Exception as e:                                    # noqa: BLE001
+        print("\nnote: could not verify plan scales (%s)" % e, file=sys.stderr)
+        return
+    registry = data.get("planScales") or {}
+    stale = []
+    for plan_id, title, width_m in checks:
+        got = (registry.get(plan_id) or {}).get("scale")
+        if got is None or abs(float(got) - width_m) > 0.02 * width_m:
+            stale.append((title, width_m, got))
+    if not stale:
+        print("\n  plan scales verified against InnerSpace's registry")
+        return
+    print("\nACTION NEEDED — InnerSpace's own scale is NOT what was imported:",
+          file=sys.stderr)
+    for title, want, got in stale:
+        print("  %-14s registry says %s, the export says %.4f m (%.2f ft)"
+              % (title, "nothing" if got is None else "%.4f m" % got,
+                 want, want * 3.28084), file=sys.stderr)
+    print("  InnerSpace measures from `planScales`, not from the `scale` shapes\n"
+          "  this tool writes, and there is no API to set it. Open each plan and\n"
+          "  use Set Scale with the figure above, or coverage will be modelled on\n"
+          "  the wrong building size.", file=sys.stderr)
+
+
 def load_catalog(args, http_, base):
     if args.project_json:
         body = json.load(open(args.project_json))
@@ -1169,6 +1209,9 @@ def run(args):
                             else "DRY-RUN (no writes; showing planned calls)"))
 
     skipped = []
+    # (plan id, title, metres across the image) per plan written, so the run can
+    # check afterwards whether InnerSpace's own scale registry actually took.
+    scale_checks: list = []
     new_order: list = []         # [(plan_id, ordering)] for the reorder at the end
     deleted_plans: set = set()   # --plan-title can point every floorplan at one
     for fp in fps:                # title; never try to delete the same plan twice
@@ -1182,6 +1225,8 @@ def run(args):
         plan_id, proj_id = w.create_plan(title, file_url)
         new_order.append((plan_id, plan_ordering(
             old_ids, ordering_by_id, fp.get("floor_number"), len(new_order))))
+        if fp.get("width_m"):
+            scale_checks.append((plan_id, title, float(fp["width_m"])))
         proj_id = proj_id if proj_id and proj_id != "<project-id>" else project_id
 
         # set the plan scale first so coverage renders accurately (no "Set Scale").
@@ -1330,6 +1375,9 @@ def run(args):
         # no-op that still looks like one was applied. Say why instead.
         print("\n  plan order: not set — no floor_number in the export and "
               "nothing to inherit; arrange the floors in InnerSpace")
+
+    if args.commit and scale_checks:
+        verify_plan_scales(http_, base, scale_checks)
 
     print("\n=== %d call(s) %s ===" % (w.n, "sent" if args.commit else "previewed"))
     if skipped:

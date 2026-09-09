@@ -30,7 +30,7 @@ from openintent_import import (
     load_obstacle_sidecar, to_scene as oi_to_scene, _plan_title,
     _synth_mac, _is_placeholder_mac, run_purge, classify_device_shapes,
     needs_own_wall_type, wall_type_shape, wall_shape, find_product_id,
-    Writer, WALL_TYPE_DEFAULTS, plan_ordering,
+    Writer, WALL_TYPE_DEFAULTS, plan_ordering, verify_plan_scales,
 )
 
 
@@ -1268,3 +1268,56 @@ class PlanMetricsPrefersInnerSpacesOwnRegistry(unittest.TestCase):
         self.assertEqual(mpp, 0.0)
         self.assertEqual(ceiling, 2.5)
         self.assertIsNone(note)
+
+
+class VerifyPlanScalesSurfacesAStaleRegistry(unittest.TestCase):
+    """InnerSpace measures from `planScales`, not from the `scale` shapes we write.
+
+    There is no API to set the registry, so an imported plan keeps whatever
+    default the console assigned. Left unreported that is invisible — the import
+    succeeds, the shapes hold the right metres, and the floor silently measures
+    wrong.
+    """
+
+    class _Http:
+        def __init__(self, registry):
+            self.registry = registry
+
+        def get_json(self, url):
+            return {"data": {"planScales": self.registry}}
+
+    def _run(self, registry, checks):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            verify_plan_scales(self._Http(registry), "https://c", checks)
+        return buf.getvalue()
+
+    def test_a_default_registry_value_is_reported(self):
+        out = self._run({"p1": {"scale": 42.2945}}, [("p1", "Downstairs", 28.3895)])
+        self.assertIn("ACTION NEEDED", out)
+        self.assertIn("Downstairs", out)
+        self.assertIn("28.3895", out)
+        self.assertIn("93.14", out)          # feet, for typing into Set Scale
+
+    def test_a_matching_registry_is_quiet(self):
+        out = self._run({"p1": {"scale": 28.3895}}, [("p1", "Downstairs", 28.3895)])
+        self.assertIn("verified", out)
+        self.assertNotIn("ACTION NEEDED", out)
+
+    def test_two_percent_drift_is_tolerated(self):
+        out = self._run({"p1": {"scale": 28.60}}, [("p1", "Downstairs", 28.3895)])
+        self.assertNotIn("ACTION NEEDED", out)
+
+    def test_a_missing_entry_is_reported_not_skipped(self):
+        out = self._run({}, [("p1", "Upstairs", 30.7912)])
+        self.assertIn("ACTION NEEDED", out)
+        self.assertIn("nothing", out)
+
+    def test_a_failed_re_read_does_not_break_the_import(self):
+        class Boom:
+            def get_json(self, url):
+                raise RuntimeError("connection reset")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+            verify_plan_scales(Boom(), "https://c", [("p1", "Downstairs", 28.3895)])
+        self.assertIn("could not verify", buf.getvalue())
